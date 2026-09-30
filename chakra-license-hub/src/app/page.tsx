@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import {
   LayoutDashboard, Command, FolderKanban, CheckSquare,
   Trello, Clock, GitBranch, BarChart2, FileText,
@@ -9,11 +10,15 @@ import {
   Bell, Moon, Plus, MoreVertical, ShieldCheck, Database, Zap,
   Edit2, Trash2, Power, Copy, Check, Box, Key
 } from "../components/icons";
+import FleetPage from "../components/fleet-page";
 
 interface Client {
   id: string;
   company_name: string;
-  token: string;
+  // Only the first 16 characters are ever sent back; the full key exists only
+  // in the response that created (or rotated) it.
+  token_prefix?: string;
+  token?: string;
   is_active: boolean;
   used_minutes: number;
   package_name?: string;
@@ -26,14 +31,19 @@ export interface Package {
 }
 
 function LicenseHub({ onLogout }: { onLogout?: () => void }) {
+  const router = useRouter();
   const [clients, setClients] = useState<Client[]>([]);
   const [packages, setPackages] = useState<Package[]>([
-    { id: '1', name: 'Starter', maxMinutes: 15000 },
-    { id: '2', name: 'Growth', maxMinutes: 25000 },
+    // Names must match chakra-gpu-fleet/fleet/packages.yaml: the fleet sizes
+    // its GPUs from each licence's package.
+    { id: '1', name: 'Essential', maxMinutes: 15000 },
+    { id: '2', name: 'Standard', maxMinutes: 25000 },
     { id: '3', name: 'Business', maxMinutes: 40000 },
-    { id: '4', name: 'Scale', maxMinutes: 75000 },
-    { id: '5', name: 'Enterprise - MD', maxMinutes: 100000 },
-    { id: '6', name: 'Enterprise - LG', maxMinutes: 200000 },
+    { id: '4', name: 'Business Plus', maxMinutes: 75000 },
+    { id: '5', name: 'Enterprise', maxMinutes: 100000 },
+    { id: '6', name: 'Enterprise Plus', maxMinutes: 200000 },
+    { id: '7', name: 'National', maxMinutes: 500000 },
+    { id: '8', name: 'National Plus', maxMinutes: 1000000 },
   ]);
 
   const getPackageMaxMinutes = (packageName?: string) => {
@@ -44,7 +54,10 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
   const [newToken, setNewToken] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [selectedPackage, setSelectedPackage] = useState("Starter");
+  const [selectedPackage, setSelectedPackage] = useState("Essential");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [revealedKey, setRevealedKey] = useState("");
+  const [isRotating, setIsRotating] = useState(false);
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [editName, setEditName] = useState("");
   const [copied, setCopied] = useState(false);
@@ -57,10 +70,18 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
   };
 
   useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((me) => me && setAdminEmail(me.email))
+      .catch(() => {});
     fetch("/api/licenses")
-      .then((res) => res.json())
+      .then((res) => {
+        if (res.status === 401) router.replace("/login");
+        return res.json();
+      })
       .then((data) => {
-        setClients(data);
+        setClients(Array.isArray(data) ? data : []);
+        if (!Array.isArray(data) && data?.error) showError(data.error);
         setIsLoading(false);
       })
       .catch((err) => {
@@ -86,8 +107,8 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
 
       if (!response.ok) throw new Error("Failed to generate token");
 
-      const newLicense = await response.json();
-      setNewToken(newLicense.token);
+      const { token, ...newLicense } = await response.json();
+      setNewToken(token);
       setClients([newLicense, ...clients]);
       setCompanyName("");
     } catch (error) {
@@ -162,13 +183,36 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
     setSelectedClient(client);
     setEditName(client.company_name);
     setCopied(false);
+    setRevealedKey("");
   };
 
-  const handleCopyToken = () => {
-    if (selectedClient) {
-      navigator.clipboard.writeText(selectedClient.token);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+  const handleCopyToken = (key: string) => {
+    navigator.clipboard.writeText(key).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Keys are stored hashed, so a lost key can't be shown again: issue a new one.
+  // The old key stops working (within a minute at the speech gateway).
+  const handleRotate = async (id: string) => {
+    if (!confirm("Issue a new key? The current key stops working and the client must switch to the new one.")) return;
+    setIsRotating(true);
+    try {
+      const response = await fetch("/api/licenses", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action: "rotate" }),
+      });
+      if (!response.ok) throw new Error("rotate failed");
+      const { token, ...row } = await response.json();
+      setRevealedKey(token);
+      setClients(clients.map(c => c.id === id ? { ...c, ...row } : c));
+      if (selectedClient && selectedClient.id === id) setSelectedClient({ ...selectedClient, ...row });
+    } catch (error) {
+      console.error(error);
+      showError("Could not rotate the key.");
+    } finally {
+      setIsRotating(false);
     }
   };
 
@@ -200,6 +244,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
               <SidebarItem icon={<Database size={16} />} label="Company" active={currentTab === 'company'} onClick={() => setCurrentTab('company')} />
               <SidebarItem icon={<Key size={16} />} label="Token" active={currentTab === 'token'} onClick={() => setCurrentTab('token')} />
               <SidebarItem icon={<Box size={16} />} label="Packages" active={currentTab === 'packages'} onClick={() => setCurrentTab('packages')} />
+              <SidebarItem icon={<Zap size={16} />} label="GPU Fleet" active={currentTab === 'fleet'} onClick={() => setCurrentTab('fleet')} />
             </div>
           </div>
         </nav>
@@ -226,7 +271,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
             </div>
             <div>
               <div className="text-sm font-semibold text-zinc-100 leading-tight">Chakra Admin</div>
-              <div className="text-[11px] text-zinc-500 font-medium">admin@chakra.ai</div>
+              <div className="text-[11px] text-zinc-500 font-medium">{adminEmail}</div>
             </div>
           </div>
 
@@ -264,7 +309,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
 
             <div className="flex items-end justify-between mb-2">
               <div>
-                <h1 className="text-[28px] font-bold tracking-tight text-zinc-100">{currentTab === 'dashboard' ? 'Welcome back, Admin' : currentTab === 'company' ? 'Manage Companies' : currentTab === 'token' ? 'Generate Tokens' : 'Subscription Packages'}</h1>
+                <h1 className="text-[28px] font-bold tracking-tight text-zinc-100">{currentTab === 'dashboard' ? 'Welcome back, Admin' : currentTab === 'company' ? 'Manage Companies' : currentTab === 'token' ? 'Generate Tokens' : currentTab === 'fleet' ? 'GPU Fleet' : 'Subscription Packages'}</h1>
               </div>
             </div>
 
@@ -310,8 +355,8 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
                         <div className="text-center py-8 text-zinc-500 text-sm">No licenses found.</div>
                       ) : (
                         clients.map((client) => (
-                          <div 
-                            key={client.id} 
+                          <div
+                            key={client.id}
                             onClick={() => openClientModal(client)}
                             className="flex items-center justify-between p-3.5 rounded-xl bg-[#15141a] border border-white/5 hover:bg-[#1a1920] transition-colors group cursor-pointer"
                           >
@@ -326,7 +371,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
                                     {client.package_name || 'Starter'}
                                   </span>
                                 </div>
-                                <div className="text-[12px] text-zinc-500 font-mono">{client.token.substring(0, 15)}...</div>
+                                <div className="text-[12px] text-zinc-500 font-mono">{client.token_prefix ?? "chk_live_"}…</div>
                               </div>
                             </div>
                             <div className="flex items-center gap-5">
@@ -407,7 +452,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
                         <label className="text-[13px] font-medium text-zinc-400 ml-1">Subscription Package</label>
                         <div className="grid grid-cols-3 gap-3">
                           {packages.map(pkg => (
-                            <div 
+                            <div
                               key={pkg.id}
                               onClick={() => setSelectedPackage(pkg.name)}
                               className={`cursor-pointer px-4 py-3 rounded-xl border text-[13px] transition-all flex justify-between items-center ${selectedPackage === pkg.name ? 'bg-[#00ebfb]/10 border-[#00ebfb]/50 text-[#00ebfb]' : 'bg-[#15141a] border-white/5 text-zinc-400 hover:border-white/10 hover:bg-[#1a1920]'}`}
@@ -433,16 +478,23 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
                         <div className="absolute top-0 left-0 w-1.5 h-full bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.8)]" />
                         <div className="text-[12px] text-indigo-400 font-bold mb-2 uppercase tracking-widest flex items-center justify-between">
                           New Token Ready
-                          <span className="bg-indigo-500/10 text-indigo-300 px-2.5 py-1 rounded text-[11px]">Copied</span>
+                          <button onClick={() => handleCopyToken(newToken)} className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded text-[11px] flex items-center gap-1.5">
+                            {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                          </button>
                         </div>
                         <div className="font-mono text-[14px] text-zinc-300 break-all bg-black/30 p-4 rounded-lg border border-white/5 selection:bg-indigo-500/30">
                           {newToken}
                         </div>
+                        <p className="text-[12px] text-amber-300/90 mt-3">
+                          Copy it now and send it to the client securely. It is stored only as a hash and cannot be shown again.
+                        </p>
                       </div>
                     )}
                   </div>
                 </div>
               </div>
+            ) : currentTab === 'fleet' ? (
+              <FleetPage />
             ) : (
               <PackagesPage packages={packages} setPackages={setPackages} />
             )}
@@ -457,7 +509,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
           <div className="bg-[#0f0e13] border border-white/10 rounded-2xl w-full max-w-md shadow-2xl p-6 relative overflow-hidden flex flex-col gap-6" onClick={e => e.stopPropagation()}>
             {/* Top usage progress line */}
             <div className="absolute top-0 left-0 w-full h-1.5 bg-white/5">
-              <div 
+              <div
                 className={`h-full transition-all duration-1000 ${
                   ((selectedClient.used_minutes || 0) / getPackageMaxMinutes(selectedClient.package_name)) > 0.9 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' :
                   ((selectedClient.used_minutes || 0) / getPackageMaxMinutes(selectedClient.package_name)) > 0.75 ? 'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'bg-[#00ebfb] shadow-[0_0_10px_rgba(0,235,251,0.5)]'
@@ -467,7 +519,7 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
             </div>
 
             <div className="absolute top-0 right-0 w-64 h-64 bg-[#00ebfb]/10 rounded-full blur-[80px] pointer-events-none" />
-            
+
             <div className="flex items-center justify-between relative z-10">
               <h2 className="text-xl font-bold text-white">Manage License</h2>
               <button onClick={() => setSelectedClient(null)} className="text-zinc-500 hover:text-white transition-colors">
@@ -478,28 +530,47 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
             <div className="space-y-4 relative z-10">
               <div>
                 <label className="block text-[12px] font-medium text-zinc-400 mb-1.5 ml-1">Company Name</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                   className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-zinc-200 text-[14px] transition-all"
                 />
               </div>
-              
+
               <div>
                 <label className="block text-[12px] font-medium text-zinc-400 mb-1.5 ml-1">License Token</label>
-                <div className="relative group">
-                  <div className="w-full px-4 py-3 bg-[#121116] border border-white/5 rounded-xl text-zinc-500 text-[14px] font-mono break-all pr-12">
-                    {selectedClient.token}
+                {revealedKey ? (
+                  <div className="space-y-2">
+                    <div className="relative group">
+                      <div className="w-full px-4 py-3 bg-[#121116] border border-indigo-500/30 rounded-xl text-zinc-300 text-[13px] font-mono break-all pr-12">
+                        {revealedKey}
+                      </div>
+                      <button
+                        onClick={() => handleCopyToken(revealedKey)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white transition-all"
+                        title="Copy token"
+                      >
+                        {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-amber-300/90 ml-1">New key: copy it now. The old key no longer works.</p>
                   </div>
-                  <button 
-                    onClick={handleCopyToken}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white transition-all opacity-0 group-hover:opacity-100"
-                    title="Copy token"
-                  >
-                    {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
-                  </button>
-                </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 px-4 py-3 bg-[#121116] border border-white/5 rounded-xl text-zinc-500 text-[14px] font-mono">
+                      {selectedClient.token_prefix ?? "chk_live_"}…
+                    </div>
+                    <button
+                      onClick={() => handleRotate(selectedClient.id)}
+                      disabled={isRotating}
+                      className="px-3 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-[12px] font-medium disabled:opacity-50 whitespace-nowrap"
+                      title="The full key is shown only once. Rotate to issue a new one."
+                    >
+                      {isRotating ? "Rotating…" : "Rotate key"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-between p-4 bg-[#15141a] border border-white/5 rounded-xl">
@@ -514,13 +585,13 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
                   <div className="text-[14px] font-medium text-zinc-200 mb-0.5">License Status</div>
                   <div className="text-[12px] text-zinc-500">{selectedClient.is_active ? 'Currently active and valid' : 'Currently suspended'}</div>
                 </div>
-                <button 
+                <button
                   onClick={() => handleToggleStatus(selectedClient.id, selectedClient.is_active)}
                   className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${selectedClient.is_active ? 'bg-[#00ebfb]' : 'bg-zinc-700'}`}
                   role="switch"
                   aria-checked={selectedClient.is_active}
                 >
-                  <span 
+                  <span
                     aria-hidden="true"
                     className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${selectedClient.is_active ? 'translate-x-5' : 'translate-x-0'}`}
                   />
@@ -529,13 +600,13 @@ function LicenseHub({ onLogout }: { onLogout?: () => void }) {
             </div>
 
             <div className="flex items-center gap-3 mt-2 relative z-10">
-              <button 
+              <button
                 onClick={() => handleDelete(selectedClient.id)}
                 className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all font-medium text-[14px]"
               >
                 <Trash2 size={16} />
               </button>
-              <button 
+              <button
                 onClick={() => handleSaveEdit(selectedClient.id)}
                 className="flex-1 py-3 bg-[#00ebfb] hover:bg-[#00ebfb]/90 text-black rounded-xl font-bold transition-all flex items-center justify-center text-[14px] shadow-[0_0_15px_rgba(0,235,251,0.2)]"
               >
@@ -621,7 +692,7 @@ function CircularProgress({ value, max, size = 42, strokeWidth = 5 }: { value: n
       <div className="absolute inset-0 flex flex-col items-center justify-center">
         <span className="text-[12px] font-bold text-zinc-100">{Math.round(percentage * 100)}%</span>
       </div>
-      
+
       {/* Tooltip */}
       <div className="absolute right-full top-1/2 -translate-y-1/2 mr-3 opacity-0 group-hover/progress:opacity-100 transition-opacity pointer-events-none z-50">
         <div className="bg-[#18181b] border border-white/10 text-zinc-200 text-[10px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap shadow-xl flex items-center gap-1.5">
@@ -639,7 +710,7 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
 
   const totalUsage = clients.reduce((acc, curr) => acc + (curr.used_minutes || 0), 0);
   const now = new Date();
-  
+
   let data: number[] = [];
   let labels: string[] = [];
 
@@ -668,20 +739,20 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
     data = new Array(12).fill(0);
     data[now.getMonth()] = totalUsage;
   }
-  
+
   const getNiceMax = (maxValue: number, ticks: number = 4) => {
     if (maxValue === 0) return 100;
     const fraction = maxValue / ticks;
     const magnitude = Math.floor(Math.log10(fraction));
     const magnitudePow = Math.pow(10, magnitude);
     const significant = fraction / magnitudePow;
-    
+
     let niceSignificant;
     if (significant <= 1) niceSignificant = 1;
     else if (significant <= 2) niceSignificant = 2;
     else if (significant <= 5) niceSignificant = 5;
     else niceSignificant = 10;
-    
+
     return niceSignificant * magnitudePow * ticks;
   };
 
@@ -691,7 +762,7 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
   const h = 300;
   const paddingX = 60;
   const paddingY = 40;
-  
+
   const points = data.map((val, i) => {
     const x = data.length > 1 ? paddingX + (i / (data.length - 1)) * (w - paddingX * 2) : w / 2;
     const y = h - paddingY - (val / maxVal) * (h - paddingY * 2);
@@ -711,8 +782,8 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
               key={p}
               onClick={() => setPeriod(p as any)}
               className={`px-3 py-1 text-[11px] font-medium rounded-md capitalize transition-all ${
-                period === p 
-                  ? 'bg-zinc-800 text-zinc-100 shadow-sm' 
+                period === p
+                  ? 'bg-zinc-800 text-zinc-100 shadow-sm'
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
@@ -729,7 +800,7 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
               <stop offset="100%" stopColor="#00ebfb" stopOpacity="0" />
             </linearGradient>
           </defs>
-          
+
           {/* Grid Lines */}
           {[0, 0.25, 0.5, 0.75, 1].map(pct => {
             const y = h - paddingY - pct * (h - paddingY*2);
@@ -743,7 +814,7 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
 
           <path d={areaD} fill="url(#gradientLine)" />
           <path d={d} fill="none" stroke="#00ebfb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="drop-shadow-[0_0_8px_rgba(0,235,251,0.5)]" />
-          
+
           {data.map((val, i) => {
             const x = data.length > 1 ? paddingX + (i / (data.length - 1)) * (w - paddingX * 2) : w / 2;
             const y = h - paddingY - (val / maxVal) * (h - paddingY * 2);
@@ -751,7 +822,7 @@ function UsageLineGraph({ clients }: { clients: Client[] }) {
               <g key={i} className="group cursor-pointer">
                 <circle cx={x} cy={y} r="5" fill="#0f0e13" stroke="#00ebfb" strokeWidth="2.5" className="transition-all duration-300 group-hover:fill-[#00ebfb]" />
                 <text x={x} y={h - paddingY + 20} fill="#71717a" fontSize="10" textAnchor="middle">{labels[i]}</text>
-                
+
                 {/* Tooltip text */}
                 <rect x={x - 30} y={y - 35} width="60" height="22" rx="4" fill="#18181b" stroke="rgba(255,255,255,0.1)" className="opacity-0 group-hover:opacity-100 transition-opacity" />
                 <text x={x} y={y - 20} fill="#00ebfb" fontSize="10" textAnchor="middle" className="opacity-0 group-hover:opacity-100 transition-opacity font-bold">{val.toLocaleString()}</text>
@@ -816,7 +887,7 @@ function PackagesPage({ packages, setPackages }: { packages: Package[], setPacka
           </button>
         </div>
       </div>
-      
+
       <div className="flex-1 bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-8 shadow-xl">
         <h3 className="text-zinc-200 font-semibold mb-6 text-lg">Existing Packages</h3>
         <div className="grid grid-cols-3 gap-5">
@@ -863,116 +934,17 @@ function PackagesPage({ packages, setPackages }: { packages: Package[], setPacka
   );
 }
 
-function LoginPage({ onLogin }: { onLogin: () => void }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loginError, setLoginError] = useState("");
-
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setLoginError("");
-    setTimeout(() => {
-      setLoading(false);
-      if (email === "admin@chakra.lk" && password === "chakra123") {
-        onLogin();
-      } else {
-        setLoginError("Invalid email or password.");
-      }
-    }, 800);
-  };
-
-  return (
-    <div className="min-h-screen flex items-center justify-center font-sans relative overflow-hidden z-0 bg-cover bg-center" style={{ backgroundImage: "url('/blue-wave-black.jpg')" }}>
-      <div className="absolute inset-0 bg-black/40 -z-10" />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-indigo-500/[0.15] rounded-full blur-[120px] pointer-events-none -z-10" />
-      <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-[#00ebfb]/[0.1] rounded-full blur-[120px] pointer-events-none -z-10" />
-      
-      <div className="w-full max-w-[420px] p-8 relative z-10">
-        <div className="flex justify-center mb-10">
-          <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={220} height={64} className="w-auto h-16 object-contain drop-shadow-2xl" priority />
-        </div>
-        
-        <div className="bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-[#00ebfb] to-indigo-500" />
-          
-          <h2 className="text-2xl font-bold text-white mb-2 text-center">Welcome Back</h2>
-          <p className="text-zinc-500 text-[13px] text-center mb-8">Enter your admin credentials to access the hub.</p>
-          
-          {loginError && (
-            <div className="mb-5 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-[13px] text-center font-medium">
-              {loginError}
-            </div>
-          )}
-
-          <form onSubmit={handleLogin} className="space-y-5">
-            <div className="space-y-2">
-              <label className="text-[12px] font-medium text-zinc-400 ml-1">Email Address</label>
-              <input 
-                type="email" 
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-                placeholder="admin@chakra.lk"
-                className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-white text-[14px] transition-all"
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <label className="text-[12px] font-medium text-zinc-400 ml-1">Password</label>
-                <a href="#" className="text-[11px] text-[#00ebfb] hover:underline" onClick={e => e.preventDefault()}>Forgot?</a>
-              </div>
-              <input 
-                type="password" 
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                placeholder="••••••••"
-                className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-white text-[14px] transition-all"
-              />
-            </div>
-            
-            <button 
-              type="submit" 
-              disabled={loading}
-              className="w-full py-3.5 mt-4 bg-[#00ebfb] text-black hover:bg-[#00ebfb]/90 rounded-xl font-bold transition-all shadow-[0_0_20px_rgba(0,235,251,0.2)] text-[14px] flex justify-center items-center gap-2 disabled:opacity-50"
-            >
-              {loading ? "Authenticating..." : "Sign In to Admin Hub"}
-            </button>
-          </form>
-        </div>
-        
-        <p className="text-center text-zinc-600 text-[11px] mt-8 font-medium tracking-wide">
-          SECURE ACCESS • CHAKRA LICENSE HUB
-        </p>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isMounted, setIsMounted] = useState(false);
-  
-  useEffect(() => {
-    setIsMounted(true);
-    const auth = localStorage.getItem("chakra_auth");
-    if (auth === "true") setIsAuthenticated(true);
-  }, []);
-
-  if (!isMounted) return <div className="min-h-screen bg-[#070709]" />; // Prevents hydration mismatch flash
-
-  if (!isAuthenticated) {
-    return <LoginPage onLogin={() => {
-      localStorage.setItem("chakra_auth", "true");
-      setIsAuthenticated(true);
-    }} />;
-  }
-  
-  return <LicenseHub onLogout={() => {
-    localStorage.removeItem("chakra_auth");
-    setIsAuthenticated(false);
-  }} />;
+  // Signing in is enforced on the server (proxy.ts + every API route); this
+  // page only renders for a signed-in admin.
+  const router = useRouter();
+  return (
+    <LicenseHub
+      onLogout={async () => {
+        await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+        router.replace("/login");
+        router.refresh();
+      }}
+    />
+  );
 }

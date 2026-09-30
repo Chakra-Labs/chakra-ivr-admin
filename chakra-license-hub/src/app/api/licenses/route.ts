@@ -1,130 +1,168 @@
-import { NextResponse } from "next/server";
-import { Pool } from "pg";
 import crypto from "crypto";
+import { Pool } from "pg";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+import { currentAdmin, unauthorized } from "@/lib/auth";
 
-// Mock database for when Postgres isn't connected yet
-let mockLicenses = [
-  { id: "1", company_name: "AgroCorp Sri Lanka", token: "chk_live_agrocorp123", is_active: true, used_minutes: 142, package_name: "Growth" },
-  { id: "2", company_name: "Island Tours Pvt Ltd", token: "chk_live_tour456", is_active: false, used_minutes: 1050, package_name: "Starter" },
+// Client API keys. Stored as SHA-256 hashes (see chakra-license-server
+// migrations/001_hash_tokens.sql): the full key is returned exactly once — when
+// it is created or rotated — and never again, by any route.
+
+const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
+
+// Mock data only when explicitly asked for (local UI work). It used to switch on
+// by itself whenever DATABASE_URL was missing.
+const MOCK = process.env.LICENSE_HUB_MOCK === "1";
+let mockLicenses: Record<string, unknown>[] = [
+  { id: 1, company_name: "AgroCorp Sri Lanka", token_prefix: "chk_live_agroco", is_active: true, used_minutes: 142, package_name: "Essential" },
+  { id: 2, company_name: "Island Tours Pvt Ltd", token_prefix: "chk_live_tour45", is_active: false, used_minutes: 1050, package_name: "Standard" },
 ];
 
-export async function GET() {
-  if (!process.env.DATABASE_URL) {
-    return NextResponse.json(mockLicenses);
-  }
+const PUBLIC_COLUMNS = "id, company_name, token_prefix, is_active, used_minutes, package_name, created_at";
 
+function newKey() {
+  const token = `chk_live_${crypto.randomBytes(32).toString("hex")}`;
+  return {
+    token,
+    hash: crypto.createHash("sha256").update(token).digest("hex"),
+    prefix: token.slice(0, 16),
+  };
+}
+
+function noDatabase(): Response {
+  return Response.json({ error: "DATABASE_URL is not configured" }, { status: 500 });
+}
+
+function serverError(error: unknown, what: string): Response {
+  console.error(`Database error (${what}):`, error);
+  return Response.json({ error: `Failed to ${what}` }, { status: 500 });
+}
+
+export async function GET() {
+  if (!(await currentAdmin())) return unauthorized();
+  if (MOCK) return Response.json(mockLicenses);
+  if (!pool) return noDatabase();
   try {
-    const result = await pool.query("SELECT * FROM licenses ORDER BY created_at DESC");
-    return NextResponse.json(result.rows);
+    const result = await pool.query(`SELECT ${PUBLIC_COLUMNS} FROM licenses ORDER BY created_at DESC`);
+    return Response.json(result.rows);
   } catch (error) {
-    console.error("Database Error:", error);
-    return NextResponse.json({ error: "Failed to fetch licenses" }, { status: 500 });
+    return serverError(error, "fetch licenses");
   }
 }
 
 export async function POST(request: Request) {
+  if (!(await currentAdmin())) return unauthorized();
+  let companyName = "";
+  let packageName = "";
   try {
-    const { companyName, packageName } = await request.json();
-    
-    if (!companyName) {
-      return NextResponse.json({ error: "Company Name is required" }, { status: 400 });
-    }
+    const body = await request.json();
+    companyName = String(body.companyName ?? "").trim().slice(0, 200);
+    packageName = String(body.packageName ?? "").trim().slice(0, 80);
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  if (!companyName) return Response.json({ error: "Company Name is required" }, { status: 400 });
 
-    let newToken = `chk_live_${crypto.randomBytes(32).toString("hex")}`;
-
-    if (!process.env.DATABASE_URL) {
-      // Mock logic
-      const newLicense = {
-        id: Math.random().toString(36).substr(2, 9),
-        company_name: companyName,
-        token: newToken,
-        is_active: true,
-        used_minutes: 0,
-        package_name: packageName || "Starter",
-      };
-      mockLicenses = [newLicense, ...mockLicenses];
-      return NextResponse.json(newLicense);
-    }
-
-    // Real DB logic
-    const query = `
-      INSERT INTO licenses (token, company_name, is_active, used_minutes, package_name, created_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
-      RETURNING *
-    `;
-    const values = [newToken, companyName, true, 0, packageName || "Starter"];
-    
-    const result = await pool.query(query, values);
-    return NextResponse.json(result.rows[0]);
-
+  const key = newKey();
+  if (MOCK) {
+    const row = { id: Date.now(), company_name: companyName, token_prefix: key.prefix, is_active: true, used_minutes: 0, package_name: packageName || "Essential" };
+    mockLicenses = [row, ...mockLicenses];
+    return Response.json({ ...row, token: key.token });
+  }
+  if (!pool) return noDatabase();
+  try {
+    const result = await pool.query(
+      `INSERT INTO licenses (token_hash, token_prefix, company_name, is_active, used_minutes, package_name, created_at)
+       VALUES ($1, $2, $3, TRUE, 0, $4, NOW()) RETURNING ${PUBLIC_COLUMNS}`,
+      [key.hash, key.prefix, companyName, packageName || "Essential"],
+    );
+    // The only response that ever carries the full key.
+    return Response.json({ ...result.rows[0], token: key.token });
   } catch (error) {
-    console.error("Database Error:", error);
-    return NextResponse.json({ error: "Failed to create license" }, { status: 500 });
+    return serverError(error, "create license");
   }
 }
 
 export async function PUT(request: Request) {
+  if (!(await currentAdmin())) return unauthorized();
+  let body: { id?: unknown; action?: unknown; companyName?: unknown; isActive?: unknown; packageName?: unknown };
   try {
-    const { id, action, companyName, isActive } = await request.json();
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id)) return Response.json({ error: "ID is required" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json({ error: "ID is required" }, { status: 400 });
+  if (MOCK) {
+    const row = mockLicenses.find((l) => l.id === id);
+    if (!row) return Response.json({ error: "Not found" }, { status: 404 });
+    if (body.action === "edit" && body.companyName) row.company_name = String(body.companyName);
+    else if (body.action === "toggle_status") row.is_active = Boolean(body.isActive);
+    else if (body.action === "rotate") {
+      const key = newKey();
+      row.token_prefix = key.prefix;
+      return Response.json({ ...row, token: key.token });
     }
+    return Response.json(row);
+  }
+  if (!pool) return noDatabase();
 
-    if (!process.env.DATABASE_URL) {
-      // Mock logic
-      const licenseIndex = mockLicenses.findIndex(l => l.id === id);
-      if (licenseIndex === -1) return NextResponse.json({ error: "Not found" }, { status: 404 });
-      
-      if (action === 'edit' && companyName) {
-        mockLicenses[licenseIndex].company_name = companyName;
-      } else if (action === 'toggle_status') {
-        mockLicenses[licenseIndex].is_active = isActive !== undefined ? isActive : !mockLicenses[licenseIndex].is_active;
-      }
-      return NextResponse.json(mockLicenses[licenseIndex]);
+  try {
+    let result;
+    if (body.action === "edit" && typeof body.companyName === "string" && body.companyName.trim()) {
+      result = await pool.query(
+        `UPDATE licenses SET company_name = $1 WHERE id = $2 RETURNING ${PUBLIC_COLUMNS}`,
+        [body.companyName.trim().slice(0, 200), id],
+      );
+    } else if (body.action === "toggle_status") {
+      result = await pool.query(
+        `UPDATE licenses SET is_active = $1 WHERE id = $2 RETURNING ${PUBLIC_COLUMNS}`,
+        [Boolean(body.isActive), id],
+      );
+    } else if (body.action === "package" && typeof body.packageName === "string") {
+      result = await pool.query(
+        `UPDATE licenses SET package_name = $1 WHERE id = $2 RETURNING ${PUBLIC_COLUMNS}`,
+        [body.packageName.trim().slice(0, 80), id],
+      );
+    } else if (body.action === "rotate") {
+      // A lost key can't be shown again (only its hash is kept): issue a new one.
+      // The old key stops working immediately here, and at the speech gateway
+      // within its key-cache time (60 s).
+      const key = newKey();
+      result = await pool.query(
+        `UPDATE licenses SET token_hash = $1, token_prefix = $2, token = NULL WHERE id = $3 RETURNING ${PUBLIC_COLUMNS}`,
+        [key.hash, key.prefix, id],
+      );
+      if (result.rowCount === 0) return Response.json({ error: "Not found" }, { status: 404 });
+      return Response.json({ ...result.rows[0], token: key.token });
+    } else {
+      return Response.json({ error: "Invalid action" }, { status: 400 });
     }
-
-    // Real DB logic
-    if (action === 'edit' && companyName) {
-      const result = await pool.query("UPDATE licenses SET company_name = $1 WHERE id = $2 RETURNING *", [companyName, id]);
-      return NextResponse.json(result.rows[0]);
-    } else if (action === 'toggle_status') {
-      const result = await pool.query("UPDATE licenses SET is_active = $1 WHERE id = $2 RETURNING *", [isActive, id]);
-      return NextResponse.json(result.rows[0]);
-    }
-    
-    return NextResponse.json({ error: "Invalid action" }, { status: 400 });
-
+    if (result.rowCount === 0) return Response.json({ error: "Not found" }, { status: 404 });
+    return Response.json(result.rows[0]);
   } catch (error) {
-    console.error("Database Error:", error);
-    return NextResponse.json({ error: "Failed to update license" }, { status: 500 });
+    return serverError(error, "update license");
   }
 }
 
 export async function DELETE(request: Request) {
+  if (!(await currentAdmin())) return unauthorized();
+  let id: number;
   try {
-    const { id } = await request.json();
-
-    if (!id) {
-      return NextResponse.json({ error: "ID is required" }, { status: 400 });
-    }
-
-    if (!process.env.DATABASE_URL) {
-      // Mock logic
-      mockLicenses = mockLicenses.filter(l => l.id !== id);
-      return NextResponse.json({ success: true });
-    }
-
-    // Real DB logic
+    id = Number((await request.json()).id);
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  if (!Number.isInteger(id)) return Response.json({ error: "ID is required" }, { status: 400 });
+  if (MOCK) {
+    mockLicenses = mockLicenses.filter((l) => l.id !== id);
+    return Response.json({ success: true });
+  }
+  if (!pool) return noDatabase();
+  try {
     await pool.query("DELETE FROM licenses WHERE id = $1", [id]);
-    return NextResponse.json({ success: true });
-
+    return Response.json({ success: true });
   } catch (error) {
-    console.error("Database Error:", error);
-    return NextResponse.json({ error: "Failed to delete license" }, { status: 500 });
+    return serverError(error, "delete license");
   }
 }
