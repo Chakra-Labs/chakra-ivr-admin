@@ -48,7 +48,7 @@ jobs:
         run: |
           CMD="sudo -u ubuntu -H bash /opt/chakra/chakra-gpu-fleet/deploy/deploy.sh admin $GITHUB_SHA"
           ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-                 --comment "chakra-ivr-admin ${GITHUB_SHA::7}" --timeout-seconds 600 \
+                 --comment "chakra-ivr-console ${GITHUB_SHA::7}" --timeout-seconds 600 \
                  --parameters "$(jq -nc --arg c "$CMD" '{commands: [$c]}')" \
                  --query Command.CommandId --output text)
           echo "SSM command $ID"
