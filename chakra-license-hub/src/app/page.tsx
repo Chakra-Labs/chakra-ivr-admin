@@ -1,950 +1,336 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// The admin hub shell: sidebar, header, routing (#hash), shared data.
+// Signing in is enforced on the server (proxy.ts + every API route); this page
+// only renders for a signed-in admin.
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import {
-  LayoutDashboard, Command, FolderKanban, CheckSquare,
-  Trello, Clock, GitBranch, BarChart2, FileText,
-  Users, Settings, HelpCircle, Sparkles, Search,
-  Bell, Moon, Plus, MoreVertical, ShieldCheck, Database, Zap,
-  Edit2, Trash2, Power, Copy, Check, Box, Key
-} from "../components/icons";
-import FleetPage from "../components/fleet-page";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
-interface Client {
-  id: string;
-  company_name: string;
-  // Only the first 16 characters are ever sent back; the full key exists only
-  // in the response that created (or rotated) it.
-  token_prefix?: string;
-  token?: string;
-  is_active: boolean;
-  used_minutes: number;
-  package_name?: string;
+import CompaniesPage from "@/components/companies-page";
+import CompanyDetail from "@/components/company-detail";
+import DashboardPage from "@/components/dashboard-page";
+import { FleetProvider, useFleet } from "@/components/fleet-context";
+import FleetPage from "@/components/fleet-page";
+import GpuPage from "@/components/gpu-page";
+import { Header } from "@/components/header";
+import { HubContext, licenseApi, parseRoute, routeHash, type Hub, type Route } from "@/components/hub-context";
+import { Activity, Box, Building, Check, Copy, Key, LayoutDashboard, Server, X } from "@/components/icons";
+import NewLicensePage from "@/components/new-license-page";
+import PackagesPage from "@/components/packages-page";
+import { Button, cx } from "@/components/ui";
+import { DEFAULT_PACKAGES, type Package } from "@/lib/packages";
+import type { Client } from "@/lib/types";
+
+const TITLES: Record<Route["page"], { title: string; subtitle: string }> = {
+  dashboard: { title: "Dashboard", subtitle: "Speech usage, customers and GPU health at a glance" },
+  companies: { title: "Companies", subtitle: "Every licensed company, its package and this month's usage" },
+  company: { title: "Company", subtitle: "" },
+  new: { title: "New licence", subtitle: "Create an API key for a company" },
+  packages: { title: "Packages", subtitle: "Monthly minutes and lines per subscription package" },
+  gpus: { title: "GPU performance", subtitle: "Health, traffic, latency and resources of every GPU" },
+  fleet: { title: "GPU fleet", subtitle: "Add, deploy, drain and remove GPU servers" },
+};
+
+export default function App() {
+  return (
+    <FleetProvider>
+      <Shell />
+    </FleetProvider>
+  );
 }
 
-export interface Package {
-  id: string;
-  name: string;
-  maxMinutes: number;
-}
-
-function LicenseHub({ onLogout }: { onLogout?: () => void }) {
+function Shell() {
   const router = useRouter();
+  const [route, setRoute] = useState<Route>({ page: "dashboard" });
   const [clients, setClients] = useState<Client[]>([]);
-  const [packages, setPackages] = useState<Package[]>([
-    // Names must match chakra-gpu-fleet/fleet/packages.yaml: the fleet sizes
-    // its GPUs from each licence's package.
-    { id: '1', name: 'Essential', maxMinutes: 15000 },
-    { id: '2', name: 'Standard', maxMinutes: 25000 },
-    { id: '3', name: 'Business', maxMinutes: 40000 },
-    { id: '4', name: 'Business Plus', maxMinutes: 75000 },
-    { id: '5', name: 'Enterprise', maxMinutes: 100000 },
-    { id: '6', name: 'Enterprise Plus', maxMinutes: 200000 },
-    { id: '7', name: 'National', maxMinutes: 500000 },
-    { id: '8', name: 'National Plus', maxMinutes: 1000000 },
-  ]);
-
-  const getPackageMaxMinutes = (packageName?: string) => {
-    const pkg = packages.find(p => p.name === packageName);
-    return pkg ? pkg.maxMinutes : 15000;
-  };
-  const [companyName, setCompanyName] = useState("");
-  const [newToken, setNewToken] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [selectedPackage, setSelectedPackage] = useState("Essential");
+  const [clientsLoaded, setClientsLoaded] = useState(false);
+  const [packages, setPackages] = useState<Package[]>(DEFAULT_PACKAGES);
   const [adminEmail, setAdminEmail] = useState("");
-  const [revealedKey, setRevealedKey] = useState("");
-  const [isRotating, setIsRotating] = useState(false);
-  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
-  const [editName, setEditName] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [currentTab, setCurrentTab] = useState("dashboard");
+  const [toastMsg, setToastMsg] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [revealed, setRevealed] = useState<{ company: string; key: string } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
-  const showError = (msg: string) => {
-    setErrorMsg(msg);
-    setTimeout(() => setErrorMsg(""), 3000);
-  };
+  // Routing on the URL hash, so a refresh or a shared link keeps the page.
+  useEffect(() => {
+    const sync = () => {
+      setRoute(parseRoute(window.location.hash));
+      setMenuOpen(false);
+      window.scrollTo({ top: 0 });
+    };
+    const first = setTimeout(sync, 0);
+    window.addEventListener("hashchange", sync);
+    return () => {
+      clearTimeout(first);
+      window.removeEventListener("hashchange", sync);
+    };
+  }, []);
 
   useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    const out = () => router.replace("/login");
+    window.addEventListener("chakra:signed-out", out);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("chakra:signed-out", out);
+    };
+  }, [router]);
+
+  const navigate = useCallback((r: Route) => {
+    window.location.hash = routeHash(r);
+  }, []);
+
+  const toast = useCallback((text: string, tone: "error" | "success" = "error") => {
+    setToastMsg({ text, tone });
+    setTimeout(() => setToastMsg((t) => (t?.text === text ? null : t)), 3500);
+  }, []);
+
+  const reloadClients = useCallback(async () => {
+    try {
+      const rows = await licenseApi<Client[]>("GET");
+      setClients(Array.isArray(rows) ? rows.map((r) => ({ ...r, month_minutes: Number(r.month_minutes) || 0 })) : []);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setClientsLoaded(true);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    const first = setTimeout(reloadClients, 0);
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
       .then((me) => me && setAdminEmail(me.email))
       .catch(() => {});
-    fetch("/api/licenses")
-      .then((res) => {
-        if (res.status === 401) router.replace("/login");
-        return res.json();
-      })
-      .then((data) => {
-        setClients(Array.isArray(data) ? data : []);
-        if (!Array.isArray(data) && data?.error) showError(data.error);
-        setIsLoading(false);
-      })
-      .catch((err) => {
-        console.error("Failed to fetch licenses", err);
-        setIsLoading(false);
-      });
-  }, []);
-
-  const generateToken = async () => {
-    if (!companyName.trim()) {
-      showError("Please enter a company name first.");
-      return;
-    }
-
-    setIsGenerating(true);
-
-    try {
-      const response = await fetch("/api/licenses", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companyName, packageName: selectedPackage }),
-      });
-
-      if (!response.ok) throw new Error("Failed to generate token");
-
-      const { token, ...newLicense } = await response.json();
-      setNewToken(token);
-      setClients([newLicense, ...clients]);
-      setCompanyName("");
-    } catch (error) {
-      console.error(error);
-      showError("An error occurred while generating the token.");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleToggleStatus = async (id: string, currentStatus: boolean) => {
-    try {
-      const response = await fetch("/api/licenses", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action: "toggle_status", isActive: !currentStatus }),
-      });
-      if (response.ok) {
-        setClients(clients.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
-        if (selectedClient && selectedClient.id === id) {
-           setSelectedClient({ ...selectedClient, is_active: !currentStatus });
-        }
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this license?")) return;
-    try {
-      const response = await fetch("/api/licenses", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-      if (response.ok) {
-        setClients(clients.filter(c => c.id !== id));
-        setSelectedClient(null);
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  const handleSaveEdit = async (id: string) => {
-    if (!editName.trim()) {
-      setSelectedClient(null);
-      return;
-    }
-    try {
-      const response = await fetch("/api/licenses", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action: "edit", companyName: editName }),
-      });
-      if (response.ok) {
-        setClients(clients.map(c => c.id === id ? { ...c, company_name: editName } : c));
-        // Also update selectedClient so UI reflects
-        if (selectedClient && selectedClient.id === id) {
-           setSelectedClient({ ...selectedClient, company_name: editName });
-        }
-      }
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setSelectedClient(null);
-    }
-  };
-
-  const openClientModal = (client: Client) => {
-    setSelectedClient(client);
-    setEditName(client.company_name);
-    setCopied(false);
-    setRevealedKey("");
-  };
-
-  const handleCopyToken = (key: string) => {
-    navigator.clipboard.writeText(key).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    const t = setInterval(reloadClients, 120_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(t);
+    };
+  }, [reloadClients]);
 
   // Keys are stored hashed, so a lost key can't be shown again: issue a new one.
   // The old key stops working (within a minute at the speech gateway).
-  const handleRotate = async (id: string) => {
-    if (!confirm("Issue a new key? The current key stops working and the client must switch to the new one.")) return;
-    setIsRotating(true);
-    try {
-      const response = await fetch("/api/licenses", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action: "rotate" }),
-      });
-      if (!response.ok) throw new Error("rotate failed");
-      const { token, ...row } = await response.json();
-      setRevealedKey(token);
-      setClients(clients.map(c => c.id === id ? { ...c, ...row } : c));
-      if (selectedClient && selectedClient.id === id) setSelectedClient({ ...selectedClient, ...row });
-    } catch (error) {
-      console.error(error);
-      showError("Could not rotate the key.");
-    } finally {
-      setIsRotating(false);
-    }
+  const rotateKey = useCallback(
+    async (client: Client) => {
+      if (!confirm(`Issue a new key for ${client.company_name}?\n\nThe current key stops working within a minute, and the company must switch to the new one.`)) {
+        return false;
+      }
+      try {
+        const { token, ...row } = await licenseApi<Client & { token: string }>("PUT", { id: client.id, action: "rotate" });
+        setClients((cs) => cs.map((c) => (c.id === client.id ? { ...c, ...row, month_minutes: c.month_minutes, last_activity: c.last_activity } : c)));
+        setRevealed({ company: client.company_name, key: token });
+        return true;
+      } catch (e) {
+        toast(`Could not rotate the key: ${(e as Error).message}`);
+        return false;
+      }
+    },
+    [toast],
+  );
+
+  const hub = useMemo<Hub>(
+    () => ({ clients, clientsLoaded, setClients, reloadClients, packages, setPackages, navigate, toast, rotateKey, now }),
+    [clients, clientsLoaded, reloadClients, packages, navigate, toast, rotateKey, now],
+  );
+
+  const logout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    router.replace("/login");
+    router.refresh();
   };
 
+  const company = route.page === "company" ? clients.find((c) => c.id === route.id) : undefined;
+  const heading =
+    route.page === "company"
+      ? { title: company?.company_name ?? "Company", subtitle: company ? `${company.package_name || "Essential"} package` : "" }
+      : TITLES[route.page];
+
   return (
-    <div className="min-h-screen bg-[#070709] text-zinc-100 flex font-sans selection:bg-indigo-500/30 overflow-hidden relative z-0">
-      {/* Toast Notification */}
-      <div className={`fixed top-6 right-6 z-[100] transition-all duration-300 transform ${errorMsg ? 'translate-x-0 opacity-100' : 'translate-x-12 opacity-0 pointer-events-none'}`}>
-        <div className="bg-[#15141a] border border-red-500/30 text-red-400 px-4 py-3 rounded-xl shadow-[0_10px_40px_rgba(239,68,68,0.1)] flex items-center gap-3 backdrop-blur-md">
-          <div className="w-8 h-8 rounded-full bg-red-500/10 flex items-center justify-center shrink-0 border border-red-500/20">
-            <span className="text-red-500 font-bold font-mono">!</span>
-          </div>
-          <p className="text-[13px] font-medium pr-2">{errorMsg}</p>
+    <HubContext.Provider value={hub}>
+      <div className="min-h-screen bg-canvas text-ink flex">
+        {/* Toast */}
+        <div
+          role="status"
+          className={cx(
+            "fixed top-5 right-5 z-[100] transition-all duration-300",
+            toastMsg ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 pointer-events-none",
+          )}
+        >
+          {toastMsg && (
+            <div
+              className={cx(
+                "px-4 py-3 rounded-xl border shadow-2xl text-[13px] font-medium bg-panel-2 max-w-sm",
+                toastMsg.tone === "error" ? "border-critical/40 text-critical" : "border-good/40 text-good",
+              )}
+            >
+              {toastMsg.text}
+            </div>
+          )}
         </div>
-      </div>
 
-      <div className="absolute -top-40 right-0 w-[800px] h-[800px] bg-[#00ebfb]/[0.03] rounded-full blur-[120px] pointer-events-none -z-10" />
-      <div className="absolute -bottom-40 -left-40 w-[800px] h-[800px] bg-indigo-500/[0.03] rounded-full blur-[120px] pointer-events-none -z-10" />
-      {/* Sidebar */}
-      <aside className="w-[260px] border-r border-white/5 bg-[#070709] p-5 flex flex-col gap-6 shrink-0 h-screen sticky top-0">
-        <div className="flex items-center px-2 mb-6 mt-3">
-          <Image src="/chakra-labs-logo.png" alt="Chakra Labs Logo" width={220} height={64} className="w-auto h-14 object-contain" priority />
-        </div>
+        <Sidebar route={route} open={menuOpen} onClose={() => setMenuOpen(false)} />
 
-        <nav className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6">
-          <div>
-            <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3 px-2">Menu</div>
-            <div className="space-y-[2px]">
-              <SidebarItem icon={<LayoutDashboard size={16} />} label="Dashboard" active={currentTab === 'dashboard'} onClick={() => setCurrentTab('dashboard')} />
-              <SidebarItem icon={<Database size={16} />} label="Company" active={currentTab === 'company'} onClick={() => setCurrentTab('company')} />
-              <SidebarItem icon={<Key size={16} />} label="Token" active={currentTab === 'token'} onClick={() => setCurrentTab('token')} />
-              <SidebarItem icon={<Box size={16} />} label="Packages" active={currentTab === 'packages'} onClick={() => setCurrentTab('packages')} />
-              <SidebarItem icon={<Zap size={16} />} label="GPU Fleet" active={currentTab === 'fleet'} onClick={() => setCurrentTab('fleet')} />
+        <main className="flex-1 min-w-0 flex flex-col">
+          <Header
+            title={heading.title}
+            subtitle={heading.subtitle}
+            adminEmail={adminEmail}
+            onLogout={logout}
+            onOpenGpus={() => navigate({ page: "gpus" })}
+            onMenu={() => setMenuOpen(true)}
+          />
+          <div className="flex-1 px-4 md:px-8 py-6">
+            <div className="max-w-[1440px] mx-auto">
+              {route.page === "dashboard" && <DashboardPage />}
+              {route.page === "companies" && <CompaniesPage />}
+              {route.page === "company" && <CompanyDetail id={route.id} />}
+              {route.page === "new" && <NewLicensePage />}
+              {route.page === "packages" && <PackagesPage />}
+              {route.page === "gpus" && <GpuPage />}
+              {route.page === "fleet" && <FleetPage />}
             </div>
           </div>
+        </main>
+
+        {revealed && <KeyDialog company={revealed.company} keyValue={revealed.key} onClose={() => setRevealed(null)} />}
+      </div>
+    </HubContext.Provider>
+  );
+}
+
+function Sidebar({ route, open, onClose }: { route: Route; open: boolean; onClose: () => void }) {
+  const { alerts, loaded } = useFleet();
+  const down = alerts.filter((a) => a.assessment.level === "down").length;
+  const peak = alerts.filter((a) => a.assessment.level === "peak").length;
+  const active = route.page === "company" ? "companies" : route.page;
+
+  const groups: { label: string; items: { page: Route["page"]; label: string; icon: ReactNode; badge?: ReactNode }[] }[] = [
+    { label: "Overview", items: [{ page: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={16} /> }] },
+    {
+      label: "Customers",
+      items: [
+        { page: "companies", label: "Companies", icon: <Building size={16} /> },
+        { page: "new", label: "New licence", icon: <Key size={16} /> },
+        { page: "packages", label: "Packages", icon: <Box size={16} /> },
+      ],
+    },
+    {
+      label: "GPUs",
+      items: [
+        {
+          page: "gpus",
+          label: "GPU performance",
+          icon: <Activity size={16} />,
+          badge: down ? (
+            <span className="px-1.5 rounded bg-critical text-white text-[10px] font-bold">{down}</span>
+          ) : peak ? (
+            <span className="px-1.5 rounded bg-warning text-black text-[10px] font-bold">{peak}</span>
+          ) : null,
+        },
+        { page: "fleet", label: "GPU fleet", icon: <Server size={16} /> },
+      ],
+    },
+  ];
+
+  return (
+    <>
+      {open && <div className="fixed inset-0 bg-black/60 z-40 md:hidden" onClick={onClose} />}
+      <aside
+        className={cx(
+          "w-[248px] shrink-0 bg-panel border-r border-line flex flex-col h-screen z-50",
+          "fixed md:sticky top-0 transition-transform md:translate-x-0",
+          open ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <div className="h-16 px-5 flex items-center justify-between border-b border-line">
+          <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={160} height={44} className="w-auto h-9 object-contain" priority />
+          <button onClick={onClose} className="md:hidden text-ink-3 hover:text-ink" aria-label="Close menu">
+            <X size={18} />
+          </button>
+        </div>
+        <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 py-5 space-y-6">
+          {groups.map((g) => (
+            <div key={g.label}>
+              <div className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">{g.label}</div>
+              <div className="space-y-0.5">
+                {g.items.map((it) => (
+                  <a
+                    key={it.page}
+                    href={`#${it.page}`}
+                    aria-current={active === it.page ? "page" : undefined}
+                    className={cx(
+                      "flex items-center gap-3 h-9 px-3 rounded-lg text-[13px] font-medium transition-colors",
+                      active === it.page ? "bg-panel-3 text-ink" : "text-ink-2 hover:text-ink hover:bg-white/[0.03]",
+                    )}
+                  >
+                    <span className={active === it.page ? "text-accent" : "text-ink-3"}>{it.icon}</span>
+                    <span className="flex-1">{it.label}</span>
+                    {it.badge}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
         </nav>
 
-        <div className="mt-auto pt-4 border-t border-white/5">
-          <button className="w-full relative overflow-hidden rounded-xl p-4 bg-gradient-to-b from-[#181525] to-[#0c0a13] border border-white/5 hover:border-indigo-500/30 transition-all group shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] text-left">
-            <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl opacity-50 group-hover:opacity-100 transition-opacity" />
-            <div className="relative z-10 flex flex-col gap-1">
-              <Sparkles className="text-indigo-400 mb-1" size={18} />
-              <span className="font-semibold text-sm text-zinc-200">Ask Chakra AI</span>
-              <span className="text-[10px] text-zinc-500">Get insights from your licenses</span>
-            </div>
+        {/* "Ask Chakra AI" card: hidden with the header's Ask AI button until it does something.
+        <div className="p-4 border-t border-line">
+          <button className="w-full rounded-xl p-4 bg-panel-2 border border-line text-left">
+            <Sparkles className="text-accent mb-1" size={18} />
+            <span className="block font-semibold text-sm text-ink">Ask Chakra AI</span>
+            <span className="block text-[10px] text-ink-3">Get insights from your licenses</span>
           </button>
         </div>
-      </aside>
+        */}
 
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col min-h-screen overflow-hidden relative">
-        {/* Top Header */}
-        <header className="h-[72px] px-8 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full bg-[#18181b] border border-white/10 flex items-center justify-center overflow-hidden">
-              <Users size={16} className="text-zinc-400" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold text-zinc-100 leading-tight">Chakra Admin</div>
-              <div className="text-[11px] text-zinc-500 font-medium">{adminEmail}</div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <div className="relative group">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 group-focus-within:text-indigo-400 transition-colors" size={16} />
-              <input
-                type="text"
-                placeholder="Search Anything..."
-                className="pl-10 pr-4 py-2 h-9 bg-[#121214] border border-white/5 rounded-full text-[13px] focus:outline-none focus:border-indigo-500/50 focus:bg-[#18181b] w-[280px] transition-all placeholder-zinc-600 text-zinc-200"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button className="w-9 h-9 rounded-full bg-[#121214] border border-white/5 flex items-center justify-center hover:bg-white/5 transition-colors text-zinc-400">
-                <Bell size={16} />
-              </button>
-              <button className="w-9 h-9 rounded-full bg-[#121214] border border-white/5 flex items-center justify-center hover:bg-white/5 transition-colors text-zinc-400">
-                <Moon size={16} />
-              </button>
-              <button onClick={onLogout} title="Log Out" className="w-9 h-9 rounded-full bg-[#121214] border border-white/5 flex items-center justify-center hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 transition-all text-zinc-400">
-                <Power size={14} />
-              </button>
-              <button className="h-9 px-4 ml-2 rounded-full bg-[#00ebfb] hover:bg-[#00ebfb]/90 flex items-center gap-2 font-medium text-[13px] shadow-[0_0_15px_rgba(0,235,251,0.3)] transition-all text-black border border-white/10">
-                <Sparkles size={14} />
-                Ask AI
-              </button>
-            </div>
-          </div>
-        </header>
-
-        {/* Dashboard Content */}
-        <div className="flex-1 overflow-y-auto p-8 pt-2 custom-scrollbar">
-          <div className="max-w-[1400px] mx-auto space-y-6">
-
-            <div className="flex items-end justify-between mb-2">
-              <div>
-                <h1 className="text-[28px] font-bold tracking-tight text-zinc-100">{currentTab === 'dashboard' ? 'Welcome back, Admin' : currentTab === 'company' ? 'Manage Companies' : currentTab === 'token' ? 'Generate Tokens' : currentTab === 'fleet' ? 'GPU Fleet' : 'Subscription Packages'}</h1>
-              </div>
-            </div>
-
-            {currentTab === 'dashboard' ? (
-              <>
-                {/* Metrics */}
-                <div className="grid grid-cols-4 gap-5">
-                  <MetricCard
-                    title="Total Clients"
-                    value={clients.length.toString()}
-                    icon={<Users size={18} className="text-zinc-300" />}
-                  />
-                  <MetricCard
-                    title="Active Licenses"
-                    value={clients.filter(c => c.is_active).length.toString()}
-                    icon={<ShieldCheck size={18} className="text-zinc-300" />}
-                  />
-                  <MetricCard
-                    title="Suspended"
-                    value={clients.filter(c => !c.is_active).length.toString()}
-                    icon={<Command size={18} className="text-zinc-300" />}
-                  />
-                  <MetricCard
-                    title="Usage Min."
-                    value={clients.reduce((acc, curr) => acc + curr.used_minutes, 0).toLocaleString()}
-                    icon={<Clock size={18} className="text-zinc-300" />}
-                  />
-                </div>
-
-                <div className="grid grid-cols-12 gap-5 h-[400px]">
-                  {/* Licenses List - Styled like "Today's Tasks" */}
-                  <div className="col-span-5 bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-5 shadow-xl flex flex-col relative overflow-hidden">
-
-                    <div className="flex justify-between items-center mb-5 relative z-10">
-                      <h3 className="font-semibold text-[15px] text-zinc-200">Recent Licenses</h3>
-                      <button className="text-zinc-500 hover:text-zinc-300"><MoreVertical size={16} /></button>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-2.5 relative z-10">
-                      {isLoading ? (
-                        <div className="text-center py-8 text-zinc-500 text-sm">Loading licenses...</div>
-                      ) : clients.length === 0 ? (
-                        <div className="text-center py-8 text-zinc-500 text-sm">No licenses found.</div>
-                      ) : (
-                        clients.map((client) => (
-                          <div
-                            key={client.id}
-                            onClick={() => openClientModal(client)}
-                            className="flex items-center justify-between p-3.5 rounded-xl bg-[#15141a] border border-white/5 hover:bg-[#1a1920] transition-colors group cursor-pointer"
-                          >
-                            <div className="flex items-center gap-3.5">
-                              <div className="w-10 h-10 rounded-lg bg-[#1e1d24] border border-white/5 flex items-center justify-center shadow-inner group-hover:bg-[#25232d] transition-colors shrink-0">
-                                <Database size={16} className="text-indigo-400/80" />
-                              </div>
-                              <div>
-                                <div className="text-[14px] font-medium text-zinc-200 leading-tight mb-0.5 group-hover:text-[#00ebfb] transition-colors flex items-center gap-2">
-                                  {client.company_name}
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-white/5 border border-white/10 text-zinc-400 font-mono tracking-wider">
-                                    {client.package_name || 'Starter'}
-                                  </span>
-                                </div>
-                                <div className="text-[12px] text-zinc-500 font-mono">{client.token_prefix ?? "chk_live_"}…</div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-5">
-                              <div className="flex flex-col items-end">
-                                <CircularProgress value={client.used_minutes || 0} max={getPackageMaxMinutes(client.package_name)} size={44} strokeWidth={5.5} />
-                              </div>
-                              <div className="flex items-center gap-2 min-w-[70px] justify-end">
-                                <span className={`text-[12px] font-medium ${client.is_active ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {client.is_active ? 'Active' : 'Suspended'}
-                                </span>
-                                <div className={`w-1.5 h-1.5 rounded-full ${client.is_active ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]'}`} />
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Usage Line Graph */}
-                  <div className="col-span-7 bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-5 shadow-xl flex flex-col relative overflow-hidden">
-                    <UsageLineGraph clients={clients} />
-                  </div>
-                </div>
-              </>
-            ) : currentTab === 'company' ? (
-              <div className="bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-6 shadow-xl flex flex-col mt-4">
-                <h3 className="font-semibold text-[15px] text-zinc-200 mb-5">Registered Companies</h3>
-                <div className="grid grid-cols-3 gap-5">
-                  {clients.map(client => (
-                    <div key={client.id} className="p-5 bg-[#15141a] rounded-xl border border-white/5 flex flex-col gap-4 group hover:bg-[#1a1920] transition-colors cursor-pointer" onClick={() => openClientModal(client)}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-lg bg-[#1e1d24] border border-white/5 flex items-center justify-center shrink-0">
-                          <Database size={16} className="text-indigo-400" />
-                        </div>
-                        <div>
-                          <div className="text-[15px] font-medium text-zinc-200 group-hover:text-[#00ebfb] transition-colors">{client.company_name}</div>
-                          <div className="text-[12px] text-zinc-500 font-mono mt-0.5">{client.package_name || 'Starter'}</div>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-1.5 h-1.5 rounded-full ${client.is_active ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                          <span className={`text-[12px] font-medium ${client.is_active ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {client.is_active ? 'Active' : 'Suspended'}
-                          </span>
-                        </div>
-                        <div className="text-[12px] text-zinc-400 font-mono">
-                          {client.used_minutes.toLocaleString()} mins
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  {clients.length === 0 && <div className="col-span-3 text-center py-10 text-zinc-500">No companies found.</div>}
-                </div>
-              </div>
-            ) : currentTab === 'token' ? (
-              <div className="flex justify-center mt-10">
-                <div className="w-full max-w-2xl bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-8 shadow-xl flex flex-col relative overflow-hidden">
-                  <div className="flex justify-between items-center mb-8 relative z-10">
-                    <h3 className="font-semibold text-lg text-zinc-200">Generate New License</h3>
-                  </div>
-
-                  <div className="flex-1 flex flex-col justify-center items-center relative z-10 w-full">
-                    <div className="w-full space-y-6">
-                      <div className="space-y-2 text-left w-full">
-                        <label className="text-[13px] font-medium text-zinc-400 ml-1">Company Name</label>
-                        <input
-                          type="text"
-                          placeholder="Enter company name to generate token..."
-                          value={companyName}
-                          onChange={(e) => setCompanyName(e.target.value)}
-                          className="w-full px-5 py-4 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 focus:bg-[#1a1920] text-zinc-200 placeholder-zinc-600 transition-all text-[14px] shadow-inner"
-                        />
-                      </div>
-
-                      <div className="space-y-2 text-left w-full">
-                        <label className="text-[13px] font-medium text-zinc-400 ml-1">Subscription Package</label>
-                        <div className="grid grid-cols-3 gap-3">
-                          {packages.map(pkg => (
-                            <div
-                              key={pkg.id}
-                              onClick={() => setSelectedPackage(pkg.name)}
-                              className={`cursor-pointer px-4 py-3 rounded-xl border text-[13px] transition-all flex justify-between items-center ${selectedPackage === pkg.name ? 'bg-[#00ebfb]/10 border-[#00ebfb]/50 text-[#00ebfb]' : 'bg-[#15141a] border-white/5 text-zinc-400 hover:border-white/10 hover:bg-[#1a1920]'}`}
-                            >
-                              <span className="font-medium">{pkg.name}</span>
-                              <span className={`text-[11px] font-mono ${selectedPackage === pkg.name ? 'text-[#00ebfb]/70' : 'text-zinc-600'}`}>{(pkg.maxMinutes / 1000).toFixed(0)}k</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={generateToken}
-                        disabled={isGenerating}
-                        className="w-full py-4 mt-4 bg-[#00ebfb] hover:bg-[#00ebfb]/90 disabled:opacity-50 text-black rounded-xl font-bold transition-all shadow-[0_0_20px_rgba(0,235,251,0.2)] active:scale-[0.98] flex items-center justify-center gap-2 text-[15px]"
-                      >
-                        {isGenerating ? "Generating..." : <><Plus size={18} /> Create Token</>}
-                      </button>
-                    </div>
-
-                    {newToken && (
-                      <div className="mt-8 w-full bg-[#121116] border border-indigo-500/20 p-6 rounded-xl relative overflow-hidden group">
-                        <div className="absolute top-0 left-0 w-1.5 h-full bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.8)]" />
-                        <div className="text-[12px] text-indigo-400 font-bold mb-2 uppercase tracking-widest flex items-center justify-between">
-                          New Token Ready
-                          <button onClick={() => handleCopyToken(newToken)} className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded text-[11px] flex items-center gap-1.5">
-                            {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
-                          </button>
-                        </div>
-                        <div className="font-mono text-[14px] text-zinc-300 break-all bg-black/30 p-4 rounded-lg border border-white/5 selection:bg-indigo-500/30">
-                          {newToken}
-                        </div>
-                        <p className="text-[12px] text-amber-300/90 mt-3">
-                          Copy it now and send it to the client securely. It is stored only as a hash and cannot be shown again.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : currentTab === 'fleet' ? (
-              <FleetPage />
-            ) : (
-              <PackagesPage packages={packages} setPackages={setPackages} />
+        <a href="#gpus" className="m-3 p-3 rounded-xl border border-line bg-panel-2 flex items-center gap-3 hover:border-line-strong transition-colors">
+          <span
+            className={cx(
+              "w-2 h-2 rounded-full shrink-0",
+              !loaded ? "bg-ink-3" : down ? "bg-critical pulse-critical" : peak ? "bg-warning" : "bg-good",
             )}
+          />
+          <span className="text-[12px] text-ink-2 leading-tight">
+            {!loaded ? "Checking GPUs…" : down ? `${down} GPU${down > 1 ? "s" : ""} down` : peak ? `${peak} GPU${peak > 1 ? "s" : ""} at peak` : "All GPUs healthy"}
+          </span>
+        </a>
+      </aside>
+    </>
+  );
+}
 
+function KeyDialog({ company, keyValue, onClose }: { company: string; keyValue: string; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(keyValue).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[90] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="New API key">
+      <div className="w-full max-w-lg bg-panel-2 border border-line-strong rounded-2xl p-6 shadow-2xl">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-[16px] font-semibold text-ink">New API key for {company}</h2>
+            <p className="text-[12px] text-ink-3 mt-1">The old key stops working within a minute.</p>
           </div>
-        </div>
-      </main>
-
-      {/* Modal Popup */}
-      {selectedClient && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all opacity-100" onClick={() => setSelectedClient(null)}>
-          <div className="bg-[#0f0e13] border border-white/10 rounded-2xl w-full max-w-md shadow-2xl p-6 relative overflow-hidden flex flex-col gap-6" onClick={e => e.stopPropagation()}>
-            {/* Top usage progress line */}
-            <div className="absolute top-0 left-0 w-full h-1.5 bg-white/5">
-              <div
-                className={`h-full transition-all duration-1000 ${
-                  ((selectedClient.used_minutes || 0) / getPackageMaxMinutes(selectedClient.package_name)) > 0.9 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' :
-                  ((selectedClient.used_minutes || 0) / getPackageMaxMinutes(selectedClient.package_name)) > 0.75 ? 'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'bg-[#00ebfb] shadow-[0_0_10px_rgba(0,235,251,0.5)]'
-                }`}
-                style={{ width: `${Math.min(100, Math.max(0, ((selectedClient.used_minutes || 0) / getPackageMaxMinutes(selectedClient.package_name)) * 100))}%` }}
-              />
-            </div>
-
-            <div className="absolute top-0 right-0 w-64 h-64 bg-[#00ebfb]/10 rounded-full blur-[80px] pointer-events-none" />
-
-            <div className="flex items-center justify-between relative z-10">
-              <h2 className="text-xl font-bold text-white">Manage License</h2>
-              <button onClick={() => setSelectedClient(null)} className="text-zinc-500 hover:text-white transition-colors">
-                <Plus className="rotate-45" size={20} />
-              </button>
-            </div>
-
-            <div className="space-y-4 relative z-10">
-              <div>
-                <label className="block text-[12px] font-medium text-zinc-400 mb-1.5 ml-1">Company Name</label>
-                <input
-                  type="text"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-zinc-200 text-[14px] transition-all"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[12px] font-medium text-zinc-400 mb-1.5 ml-1">License Token</label>
-                {revealedKey ? (
-                  <div className="space-y-2">
-                    <div className="relative group">
-                      <div className="w-full px-4 py-3 bg-[#121116] border border-indigo-500/30 rounded-xl text-zinc-300 text-[13px] font-mono break-all pr-12">
-                        {revealedKey}
-                      </div>
-                      <button
-                        onClick={() => handleCopyToken(revealedKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white transition-all"
-                        title="Copy token"
-                      >
-                        {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
-                      </button>
-                    </div>
-                    <p className="text-[11px] text-amber-300/90 ml-1">New key: copy it now. The old key no longer works.</p>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 px-4 py-3 bg-[#121116] border border-white/5 rounded-xl text-zinc-500 text-[14px] font-mono">
-                      {selectedClient.token_prefix ?? "chk_live_"}…
-                    </div>
-                    <button
-                      onClick={() => handleRotate(selectedClient.id)}
-                      disabled={isRotating}
-                      className="px-3 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-[12px] font-medium disabled:opacity-50 whitespace-nowrap"
-                      title="The full key is shown only once. Rotate to issue a new one."
-                    >
-                      {isRotating ? "Rotating…" : "Rotate key"}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-[#15141a] border border-white/5 rounded-xl">
-                <div>
-                  <div className="text-[14px] font-medium text-zinc-200 mb-0.5">Package</div>
-                  <div className="text-[12px] text-[#00ebfb] font-medium">{selectedClient.package_name || 'Starter'}</div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-[#15141a] border border-white/5 rounded-xl">
-                <div>
-                  <div className="text-[14px] font-medium text-zinc-200 mb-0.5">License Status</div>
-                  <div className="text-[12px] text-zinc-500">{selectedClient.is_active ? 'Currently active and valid' : 'Currently suspended'}</div>
-                </div>
-                <button
-                  onClick={() => handleToggleStatus(selectedClient.id, selectedClient.is_active)}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${selectedClient.is_active ? 'bg-[#00ebfb]' : 'bg-zinc-700'}`}
-                  role="switch"
-                  aria-checked={selectedClient.is_active}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${selectedClient.is_active ? 'translate-x-5' : 'translate-x-0'}`}
-                  />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 mt-2 relative z-10">
-              <button
-                onClick={() => handleDelete(selectedClient.id)}
-                className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all font-medium text-[14px]"
-              >
-                <Trash2 size={16} />
-              </button>
-              <button
-                onClick={() => handleSaveEdit(selectedClient.id)}
-                className="flex-1 py-3 bg-[#00ebfb] hover:bg-[#00ebfb]/90 text-black rounded-xl font-bold transition-all flex items-center justify-center text-[14px] shadow-[0_0_15px_rgba(0,235,251,0.2)]"
-              >
-                Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SidebarItem({ icon, label, active = false, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick?: () => void }) {
-  return (
-    <button onClick={onClick} className={`w-full flex items-center gap-3.5 px-3 py-2.5 rounded-[10px] transition-all text-[13px] font-medium ${active
-        ? "bg-[#181622] text-zinc-200 border border-white/5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
-        : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.02]"
-      }`}>
-      <div className={`flex items-center justify-center w-5 h-5 ${active ? "text-indigo-400" : ""}`}>{icon}</div>
-      {label}
-    </button>
-  );
-}
-
-function MetricCard({ title, value, icon }: { title: string, value: string, icon: React.ReactNode }) {
-  return (
-    <div className="bg-[#0f0e13] border border-white/5 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
-      <div className="absolute top-0 left-0 w-full h-1/2 bg-gradient-to-b from-white/[0.02] to-transparent pointer-events-none" />
-
-      <div className="flex items-center gap-3 mb-4 relative z-10">
-        <div className="w-9 h-9 rounded-lg bg-[#18181b] border border-white/5 flex items-center justify-center shadow-inner group-hover:bg-[#202024] transition-colors">
-          {icon}
-        </div>
-        <div className="font-medium text-[13px] text-zinc-400">{title}</div>
-      </div>
-
-      <div className="relative z-10 flex items-baseline gap-2">
-        <div className="text-[32px] font-bold text-zinc-100 tracking-tight leading-none">{value}</div>
-      </div>
-    </div>
-  );
-}
-
-function CircularProgress({ value, max, size = 42, strokeWidth = 5 }: { value: number, max: number, size?: number, strokeWidth?: number }) {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = radius * 2 * Math.PI;
-  const percentage = Math.min(1, Math.max(0, value / max));
-  const strokeDashoffset = circumference - percentage * circumference;
-
-  let color = "text-[#00ebfb]";
-  if (percentage > 0.9) {
-    color = "text-red-500";
-  } else if (percentage > 0.75) {
-    color = "text-amber-400";
-  }
-
-  return (
-    <div className="relative flex items-center justify-center group/progress" style={{ width: size, height: size }}>
-      <svg className="transform -rotate-90 w-full h-full">
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="currentColor"
-          strokeWidth={strokeWidth}
-          fill="none"
-          className="text-zinc-800"
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="currentColor"
-          strokeWidth={strokeWidth}
-          fill="none"
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-          strokeLinecap="round"
-          className={`${color} transition-all duration-1000 ease-out`}
-        />
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-[12px] font-bold text-zinc-100">{Math.round(percentage * 100)}%</span>
-      </div>
-
-      {/* Tooltip */}
-      <div className="absolute right-full top-1/2 -translate-y-1/2 mr-3 opacity-0 group-hover/progress:opacity-100 transition-opacity pointer-events-none z-50">
-        <div className="bg-[#18181b] border border-white/10 text-zinc-200 text-[10px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap shadow-xl flex items-center gap-1.5">
-          <span className="text-[#00ebfb]">{value.toLocaleString()}</span>
-          <span className="text-zinc-500">/</span>
-          <span className="text-zinc-400">{max.toLocaleString()} min</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function UsageLineGraph({ clients }: { clients: Client[] }) {
-  const [period, setPeriod] = useState<'week' | 'month' | 'year'>('week');
-
-  const totalUsage = clients.reduce((acc, curr) => acc + (curr.used_minutes || 0), 0);
-  const now = new Date();
-
-  let data: number[] = [];
-  let labels: string[] = [];
-
-  if (period === 'week') {
-    labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    data = new Array(7).fill(0);
-    const dayIndex = now.getDay() === 0 ? 6 : now.getDay() - 1;
-    data[dayIndex] = totalUsage;
-  } else if (period === 'month') {
-    labels = ['1st', '5th', '10th', '15th', '20th', '25th', '30th'];
-    data = new Array(7).fill(0);
-    const date = now.getDate();
-    const monthDays = [1, 5, 10, 15, 20, 25, 30];
-    let idx = 0;
-    let minDiff = Infinity;
-    for (let i = 0; i < monthDays.length; i++) {
-      const diff = Math.abs(date - monthDays[i]);
-      if (diff < minDiff) {
-        minDiff = diff;
-        idx = i;
-      }
-    }
-    data[idx] = totalUsage;
-  } else {
-    labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    data = new Array(12).fill(0);
-    data[now.getMonth()] = totalUsage;
-  }
-
-  const getNiceMax = (maxValue: number, ticks: number = 4) => {
-    if (maxValue === 0) return 100;
-    const fraction = maxValue / ticks;
-    const magnitude = Math.floor(Math.log10(fraction));
-    const magnitudePow = Math.pow(10, magnitude);
-    const significant = fraction / magnitudePow;
-
-    let niceSignificant;
-    if (significant <= 1) niceSignificant = 1;
-    else if (significant <= 2) niceSignificant = 2;
-    else if (significant <= 5) niceSignificant = 5;
-    else niceSignificant = 10;
-
-    return niceSignificant * magnitudePow * ticks;
-  };
-
-  const rawMax = Math.max(...data, 4);
-  const maxVal = getNiceMax(rawMax);
-  const w = 800;
-  const h = 300;
-  const paddingX = 60;
-  const paddingY = 40;
-
-  const points = data.map((val, i) => {
-    const x = data.length > 1 ? paddingX + (i / (data.length - 1)) * (w - paddingX * 2) : w / 2;
-    const y = h - paddingY - (val / maxVal) * (h - paddingY * 2);
-    return `${x},${y}`;
-  }).join(" ");
-
-  const d = `M ${points}`;
-  const areaD = `M ${data.length > 1 ? paddingX : w/2},${h-paddingY} L ${points} L ${data.length > 1 ? w-paddingX : w/2},${h-paddingY} Z`;
-
-  return (
-    <div className="w-full h-full flex flex-col relative">
-      <div className="flex justify-between items-center mb-5 relative z-10">
-        <h3 className="font-semibold text-[15px] text-zinc-200">Total Usage Over Time</h3>
-        <div className="flex items-center gap-1 bg-[#121214] p-1 rounded-lg border border-white/5">
-          {['week', 'month', 'year'].map(p => (
-            <button
-              key={p}
-              onClick={() => setPeriod(p as any)}
-              className={`px-3 py-1 text-[11px] font-medium rounded-md capitalize transition-all ${
-                period === p
-                  ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="flex-1 relative overflow-hidden">
-        <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full drop-shadow-xl" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="gradientLine" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor="#00ebfb" stopOpacity="0.5" />
-              <stop offset="100%" stopColor="#00ebfb" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-
-          {/* Grid Lines */}
-          {[0, 0.25, 0.5, 0.75, 1].map(pct => {
-            const y = h - paddingY - pct * (h - paddingY*2);
-            return (
-              <g key={pct}>
-                <line x1={paddingX} y1={y} x2={w - paddingX} y2={y} stroke="#ffffff" strokeOpacity="0.05" />
-                <text x={paddingX - 10} y={y + 4} fill="#52525b" fontSize="10" textAnchor="end">{Math.round(pct * maxVal).toLocaleString()}</text>
-              </g>
-            );
-          })}
-
-          <path d={areaD} fill="url(#gradientLine)" />
-          <path d={d} fill="none" stroke="#00ebfb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="drop-shadow-[0_0_8px_rgba(0,235,251,0.5)]" />
-
-          {data.map((val, i) => {
-            const x = data.length > 1 ? paddingX + (i / (data.length - 1)) * (w - paddingX * 2) : w / 2;
-            const y = h - paddingY - (val / maxVal) * (h - paddingY * 2);
-            return (
-              <g key={i} className="group cursor-pointer">
-                <circle cx={x} cy={y} r="5" fill="#0f0e13" stroke="#00ebfb" strokeWidth="2.5" className="transition-all duration-300 group-hover:fill-[#00ebfb]" />
-                <text x={x} y={h - paddingY + 20} fill="#71717a" fontSize="10" textAnchor="middle">{labels[i]}</text>
-
-                {/* Tooltip text */}
-                <rect x={x - 30} y={y - 35} width="60" height="22" rx="4" fill="#18181b" stroke="rgba(255,255,255,0.1)" className="opacity-0 group-hover:opacity-100 transition-opacity" />
-                <text x={x} y={y - 20} fill="#00ebfb" fontSize="10" textAnchor="middle" className="opacity-0 group-hover:opacity-100 transition-opacity font-bold">{val.toLocaleString()}</text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-    </div>
-  );
-}
-
-function PackagesPage({ packages, setPackages }: { packages: Package[], setPackages: React.Dispatch<React.SetStateAction<Package[]>> }) {
-  const [newPkgName, setNewPkgName] = useState("");
-  const [newPkgMax, setNewPkgMax] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editMax, setEditMax] = useState("");
-
-  const addPackage = () => {
-    if (!newPkgName || !newPkgMax) return;
-    const newPkg: Package = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: newPkgName,
-      maxMinutes: parseInt(newPkgMax, 10),
-    };
-    setPackages([...packages, newPkg]);
-    setNewPkgName("");
-    setNewPkgMax("");
-  };
-
-  const deletePackage = (id: string) => {
-    setPackages(packages.filter(p => p.id !== id));
-  };
-
-  const startEdit = (p: Package) => {
-    setEditingId(p.id);
-    setEditName(p.name);
-    setEditMax(p.maxMinutes.toString());
-  };
-
-  const saveEdit = () => {
-    setPackages(packages.map(p => p.id === editingId ? { ...p, name: editName, maxMinutes: parseInt(editMax) } : p));
-    setEditingId(null);
-  };
-
-  return (
-    <div className="flex gap-6 w-full mt-6 pb-20 items-start">
-      <div className="w-[350px] shrink-0 bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 p-8 rounded-2xl flex flex-col gap-6 shadow-xl sticky top-6">
-        <h3 className="text-zinc-200 font-semibold text-lg">Add New Package</h3>
-        <div className="flex flex-col gap-5">
-          <div className="flex flex-col gap-2 text-left">
-            <label className="text-[12px] font-medium text-zinc-400 ml-1">Package Name</label>
-            <input type="text" placeholder="e.g. Premium" value={newPkgName} onChange={e => setNewPkgName(e.target.value)} className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-zinc-200 text-[14px] transition-all" />
-          </div>
-          <div className="flex flex-col gap-2 text-left">
-            <label className="text-[12px] font-medium text-zinc-400 ml-1">Max Minutes</label>
-            <input type="number" placeholder="e.g. 50000" value={newPkgMax} onChange={e => setNewPkgMax(e.target.value)} className="w-full px-4 py-3 bg-[#15141a] border border-white/5 rounded-xl focus:outline-none focus:border-[#00ebfb]/50 text-zinc-200 text-[14px] transition-all" />
-          </div>
-          <button onClick={addPackage} className="w-full px-6 py-3 bg-[#00ebfb] hover:bg-[#00ebfb]/90 text-black rounded-xl font-bold transition-all shadow-[0_0_15px_rgba(0,235,251,0.2)] text-[14px] mt-2">
-            Add Package
+          <button onClick={onClose} className="text-ink-3 hover:text-ink" aria-label="Close">
+            <X size={18} />
           </button>
         </div>
-      </div>
-
-      <div className="flex-1 bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-2xl p-8 shadow-xl">
-        <h3 className="text-zinc-200 font-semibold mb-6 text-lg">Existing Packages</h3>
-        <div className="grid grid-cols-3 gap-5">
-          {packages.map(p => (
-            <div key={p.id} className="flex flex-col p-5 bg-[#15141a] rounded-xl border border-white/5 group hover:bg-[#1a1920] transition-colors relative overflow-hidden min-h-[140px]">
-              {editingId === p.id ? (
-                <div className="flex flex-col h-full justify-between gap-4">
-                  <div className="space-y-3">
-                    <input type="text" value={editName} onChange={e => setEditName(e.target.value)} className="w-full px-3 py-2 bg-[#0f0e13] border border-white/10 text-white rounded-lg text-sm focus:outline-none focus:border-[#00ebfb]" />
-                    <input type="number" value={editMax} onChange={e => setEditMax(e.target.value)} className="w-full px-3 py-2 bg-[#0f0e13] border border-white/10 text-white rounded-lg text-sm focus:outline-none focus:border-[#00ebfb]" />
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={saveEdit} className="flex-1 text-[#00ebfb] hover:text-[#00ebfb]/80 py-2 bg-[#00ebfb]/10 rounded-lg text-sm font-medium transition-colors">Save</button>
-                    <button onClick={() => setEditingId(null)} className="flex-1 text-zinc-400 hover:text-white py-2 bg-white/5 rounded-lg text-sm font-medium transition-colors">Cancel</button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col h-full justify-between">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-10 h-10 rounded-lg bg-[#1e1d24] border border-white/5 flex items-center justify-center shrink-0 group-hover:bg-[#25232d] transition-colors">
-                      <Box size={18} className="text-indigo-400" />
-                    </div>
-                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={() => startEdit(p)} className="p-2 text-zinc-500 hover:text-[#00ebfb] hover:bg-[#00ebfb]/10 rounded-lg transition-colors">
-                        <Edit2 size={14} />
-                      </button>
-                      <button onClick={() => deletePackage(p.id)} className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors">
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-200 font-semibold text-[16px] group-hover:text-[#00ebfb] transition-colors">{p.name}</div>
-                    <div className="text-zinc-500 text-[13px] font-mono mt-1">{p.maxMinutes.toLocaleString()} mins</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-          {packages.length === 0 && <div className="col-span-3 text-center py-8 text-zinc-500">No packages available.</div>}
+        <div className="font-mono text-[13px] text-ink break-all bg-canvas border border-line rounded-xl p-4 select-all">{keyValue}</div>
+        <p className="text-[12px] text-warning mt-3">
+          Copy it now and send it to the company securely. Keys are stored only as a hash, so this is the only time it can be shown.
+        </p>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="primary" onClick={copy}>
+            {copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy key</>}
+          </Button>
+          <Button onClick={onClose}>Done</Button>
         </div>
       </div>
     </div>
-  );
-}
-
-export default function App() {
-  // Signing in is enforced on the server (proxy.ts + every API route); this
-  // page only renders for a signed-in admin.
-  const router = useRouter();
-  return (
-    <LicenseHub
-      onLogout={async () => {
-        await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
-        router.replace("/login");
-        router.refresh();
-      }}
-    />
   );
 }

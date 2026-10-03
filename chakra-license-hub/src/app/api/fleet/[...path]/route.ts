@@ -19,6 +19,7 @@ const ALLOWED: [string, RegExp][] = [
   ["GET", /^deployments\/\d+$/],
   ["GET", /^capacity$/],
   ["GET", /^usage$/],
+  ["GET", /^metrics$/],
   ["GET", /^ssh-public-key$/],
 ];
 

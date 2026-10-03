@@ -1,20 +1,18 @@
 import crypto from "crypto";
-import { Pool } from "pg";
 
 import { currentAdmin, unauthorized } from "@/lib/auth";
+import { pool, TIME_ZONE, usageSchema } from "@/lib/db";
 
 // Client API keys. Stored as SHA-256 hashes (see chakra-license-server
 // migrations/001_hash_tokens.sql): the full key is returned exactly once — when
 // it is created or rotated — and never again, by any route.
 
-const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
-
 // Mock data only when explicitly asked for (local UI work). It used to switch on
 // by itself whenever DATABASE_URL was missing.
 const MOCK = process.env.LICENSE_HUB_MOCK === "1";
 let mockLicenses: Record<string, unknown>[] = [
-  { id: 1, company_name: "AgroCorp Sri Lanka", token_prefix: "chk_live_agroco", is_active: true, used_minutes: 142, package_name: "Essential" },
-  { id: 2, company_name: "Island Tours Pvt Ltd", token_prefix: "chk_live_tour45", is_active: false, used_minutes: 1050, package_name: "Standard" },
+  { id: 1, company_name: "AgroCorp Sri Lanka", token_prefix: "chk_live_agroco", is_active: true, month_minutes: 142, package_name: "Essential" },
+  { id: 2, company_name: "Island Tours Pvt Ltd", token_prefix: "chk_live_tour45", is_active: false, month_minutes: 1050, package_name: "Standard" },
 ];
 
 const PUBLIC_COLUMNS = "id, company_name, token_prefix, is_active, used_minutes, package_name, created_at";
@@ -42,7 +40,28 @@ export async function GET() {
   if (MOCK) return Response.json(mockLicenses);
   if (!pool) return noDatabase();
   try {
-    const result = await pool.query(`SELECT ${PUBLIC_COLUMNS} FROM licenses ORDER BY created_at DESC`);
+    // Usage comes from the speech gateway's meter (speech_usage), this month
+    // in Sri Lanka time. `used_minutes` is the old license server's counter,
+    // which nothing reports to any more.
+    if (!(await usageSchema()).table) {
+      const result = await pool.query(`SELECT ${PUBLIC_COLUMNS} FROM licenses ORDER BY created_at DESC`);
+      return Response.json(result.rows.map((r) => ({ ...r, month_minutes: 0, last_activity: null })));
+    }
+    const result = await pool.query(
+      `SELECT ${PUBLIC_COLUMNS.split(", ").map((c) => `l.${c}`).join(", ")},
+              COALESCE(u.month_minutes, 0)::float8 AS month_minutes, a.last_activity
+       FROM licenses l
+       LEFT JOIN (
+         SELECT license_id, SUM(stt_seconds + tts_seconds) / 60 AS month_minutes
+         FROM speech_usage
+         WHERE hour >= date_trunc('month', now() AT TIME ZONE $1) AT TIME ZONE $1
+         GROUP BY license_id
+       ) u ON u.license_id = l.id
+       LEFT JOIN (SELECT license_id, MAX(hour) AS last_activity FROM speech_usage GROUP BY license_id) a
+         ON a.license_id = l.id
+       ORDER BY l.created_at DESC`,
+      [TIME_ZONE],
+    );
     return Response.json(result.rows);
   } catch (error) {
     return serverError(error, "fetch licenses");
