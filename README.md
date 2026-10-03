@@ -2,7 +2,7 @@
 
 | Part | What it is |
 |---|---|
-| `chakra-license-hub/` | Admin hub (Next.js 16): companies, API keys, packages, **GPU Fleet** |
+| `chakra-license-hub/` | **Chakra Console**, the admin hub (Next.js 16): dashboard and usage analytics, companies, API keys, packages, GPU performance and **GPU Fleet** |
 | `chakra-license-server/` | License server (FastAPI): `/verify` and `/track-usage` for client apps |
 
 Both use the `licenses` table in the admin database. The speech gateway in

@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { useFleet } from "./fleet-context";
 import { AlertOctagon, AlertTriangle, Bell, CheckCircle, ChevronRight, LogOut, Menu } from "./icons";
+import { useLoading } from "@/lib/loading";
 import { cx } from "./ui";
 
 // Kept for when search, the theme switch and Ask AI are built (removed from
@@ -15,18 +16,23 @@ export function Header({
   subtitle,
   adminEmail,
   onLogout,
-  onOpenGpus,
+  onOpenGpu,
   onMenu,
 }: {
   title: string;
   subtitle?: React.ReactNode;
   adminEmail: string;
   onLogout: () => void;
-  onOpenGpus: () => void;
+  onOpenGpu: (node?: number) => void;
   onMenu: () => void;
 }) {
+  const loading = useLoading();
   return (
-    <header className="h-16 px-4 md:px-8 flex items-center justify-between gap-4 border-b border-line bg-canvas/80 backdrop-blur sticky top-0 z-30">
+    <header className="relative h-16 px-4 md:px-8 flex items-center justify-between gap-4 border-b border-line bg-canvas/80 backdrop-blur sticky top-0 z-30">
+      {/* Loading bar along the bottom edge while the admin waits on a request. */}
+      <div className="absolute left-0 right-0 -bottom-px h-[2px] overflow-hidden pointer-events-none" role="progressbar" aria-hidden={!loading} aria-label="Loading">
+        {loading && <div className="progress-bar" />}
+      </div>
       <div className="flex items-center gap-3 min-w-0">
         <button onClick={onMenu} className="md:hidden p-2 -ml-2 text-ink-2 hover:text-ink" aria-label="Open menu">
           <Menu size={18} />
@@ -51,13 +57,13 @@ export function Header({
           Ask AI
         </button>
         */}
-        <NotificationBell onOpenGpus={onOpenGpus} />
+        <NotificationBell onOpenGpu={onOpenGpu} />
         <div className="hidden sm:flex items-center gap-2.5 pl-3 ml-1 border-l border-line">
           <div className="w-8 h-8 rounded-full bg-panel-3 border border-line-strong flex items-center justify-center text-[12px] font-semibold text-ink-2 uppercase">
             {adminEmail ? adminEmail[0] : "A"}
           </div>
           <div className="hidden lg:block leading-tight">
-            <div className="text-[12px] font-medium text-ink">Chakra Admin</div>
+            <div className="text-[12px] font-medium text-ink">Administrator</div>
             <div className="text-[11px] text-ink-3">{adminEmail}</div>
           </div>
         </div>
@@ -74,7 +80,7 @@ export function Header({
   );
 }
 
-function NotificationBell({ onOpenGpus }: { onOpenGpus: () => void }) {
+function NotificationBell({ onOpenGpu }: { onOpenGpu: (node?: number) => void }) {
   const { alerts, loaded, error } = useFleet();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -143,7 +149,7 @@ function NotificationBell({ onOpenGpus }: { onOpenGpus: () => void }) {
                   key={node.id}
                   onClick={() => {
                     setOpen(false);
-                    onOpenGpus();
+                    onOpenGpu(node.id);
                   }}
                   className={cx(
                     "w-full text-left px-4 py-3 border-b border-line last:border-0 hover:bg-white/[0.03] flex gap-3",

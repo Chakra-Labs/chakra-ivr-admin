@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { useHub } from "./hub-context";
 import { Building, ChevronRight, Key, Plus, RefreshCw, Search } from "./icons";
-import { Badge, Button, Empty, Meter, Segmented, Skeleton, inputClass } from "./ui";
+import { Badge, Button, Empty, Meter, Segmented, Skeleton, Spinner, inputClass } from "./ui";
 import { ago, compact, dateOnly, minutes, pct } from "@/lib/format";
 import { packageQuota } from "@/lib/packages";
 
@@ -52,8 +52,8 @@ export default function CompaniesPage() {
 
       {!clientsLoaded ? (
         <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-4">
-          {[0, 1, 2].map((i) => (
-            <Skeleton key={i} className="h-[210px]" />
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <CompanyCardSkeleton key={i} />
           ))}
         </div>
       ) : shown.length === 0 ? (
@@ -65,7 +65,9 @@ export default function CompaniesPage() {
             return (
               <article
                 key={c.id}
-                className="group bg-panel border border-line rounded-2xl p-5 flex flex-col gap-4 hover:border-line-strong transition-colors cursor-pointer"
+                className="group bg-panel border border-line rounded-2xl p-5 flex flex-col gap-4 hover:border-line-strong hover:-translate-y-0.5 transition-[border-color,transform] duration-200 cursor-pointer"
+                // Shared with the company page's header card: the browser morphs one into the other.
+                style={{ viewTransitionName: `company-${c.id}` }}
                 onClick={() => navigate({ page: "company", id: c.id })}
               >
                 <div className="flex items-start gap-3">
@@ -99,7 +101,7 @@ export default function CompaniesPage() {
                       }}
                       title="Keys are stored hashed and shown only once. Rotate to issue a new one."
                     >
-                      <RefreshCw size={12} /> {rotating === c.id ? "Rotating…" : "Rotate"}
+                      {rotating === c.id ? <Spinner size={12} /> : <RefreshCw size={12} />} {rotating === c.id ? "Rotating…" : "Rotate"}
                     </Button>
                   </div>
                   <div className="font-mono text-[12px] text-ink-2 truncate">{c.token_prefix ?? "chk_live_"}••••••••••••</div>
@@ -121,6 +123,26 @@ export default function CompaniesPage() {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function CompanyCardSkeleton() {
+  return (
+    <div className="bg-panel border border-line rounded-2xl p-5 space-y-4" aria-hidden="true">
+      <div className="flex items-center gap-3">
+        <Skeleton className="w-10 h-10 rounded-xl" />
+        <div className="flex-1 space-y-2">
+          <Skeleton className="h-3.5 w-1/2" />
+          <Skeleton className="h-3 w-1/3" />
+        </div>
+      </div>
+      <Skeleton className="h-[62px] rounded-xl" />
+      <div className="space-y-2">
+        <Skeleton className="h-3 w-full" />
+        <Skeleton className="h-1.5 w-full" />
+      </div>
+      <Skeleton className="h-3 w-2/3" />
     </div>
   );
 }

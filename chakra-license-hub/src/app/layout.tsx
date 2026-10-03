@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -13,8 +13,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Chakra License Hub",
-  description: "Chakra Labs admin: licences, API keys and the GPU speech fleet",
+  title: { default: "Chakra Console", template: "%s · Chakra Console" },
+  description: "Chakra Labs' admin console: customers, licences and API keys, speech usage, and the GPU fleet's health and performance.",
+  applicationName: "Chakra Console",
+  authors: [{ name: "Chakra Labs" }],
+  // A private admin tool: keep it out of search engines.
+  robots: { index: false, follow: false },
+  // Icons: app/icon.png, app/apple-icon.png and app/favicon.ico (the Chakra mark).
+};
+
+export const viewport: Viewport = {
+  themeColor: "#08090b",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

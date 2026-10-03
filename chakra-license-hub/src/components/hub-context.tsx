@@ -4,6 +4,7 @@
 // the "new key" dialog. Lives in the shell (app/page.tsx).
 import { createContext, useCallback, useContext, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
+import { track } from "@/lib/loading";
 import type { Package } from "@/lib/packages";
 import type { Analytics, Client } from "@/lib/types";
 
@@ -13,26 +14,30 @@ export type Route =
   | { page: "company"; id: number }
   | { page: "new" }
   | { page: "packages" }
-  | { page: "gpus" }
+  | { page: "gpus"; node?: number }
   | { page: "fleet" };
 
 export function parseRoute(hash: string): Route {
   const h = hash.replace(/^#\/?/, "");
   const company = /^company\/(\d+)$/.exec(h);
   if (company) return { page: "company", id: Number(company[1]) };
+  const gpu = /^gpus\/(\d+)$/.exec(h);
+  if (gpu) return { page: "gpus", node: Number(gpu[1]) };
   if (["companies", "new", "packages", "gpus", "fleet"].includes(h)) return { page: h } as Route;
   return { page: "dashboard" };
 }
 
 export function routeHash(r: Route): string {
-  return r.page === "company" ? `#company/${r.id}` : `#${r.page}`;
+  if (r.page === "company") return `#company/${r.id}`;
+  if (r.page === "gpus" && r.node != null) return `#gpus/${r.node}`;
+  return `#${r.page}`;
 }
 
 export interface Hub {
   clients: Client[];
   clientsLoaded: boolean;
   setClients: Dispatch<SetStateAction<Client[]>>;
-  reloadClients: () => Promise<void>;
+  reloadClients: (quiet?: boolean) => Promise<void>;
   packages: Package[];
   setPackages: Dispatch<SetStateAction<Package[]>>;
   navigate: (r: Route) => void;
@@ -56,13 +61,16 @@ export function signedOut() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event("chakra:signed-out"));
 }
 
-export async function licenseApi<T>(method: string, body?: unknown): Promise<T> {
-  const res = await fetch("/api/licenses", {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: "no-store",
-  });
+export async function licenseApi<T>(method: string, body?: unknown, quiet = false): Promise<T> {
+  const res = await track(
+    fetch("/api/licenses", {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    }),
+    quiet,
+  );
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) signedOut();
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
@@ -75,12 +83,12 @@ export function useAnalytics(days: number, license?: number) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (quiet = false) => {
     setLoading(true);
     try {
       const q = new URLSearchParams({ days: String(days) });
       if (license != null) q.set("license", String(license));
-      const res = await fetch(`/api/analytics?${q}`, { cache: "no-store" });
+      const res = await track(fetch(`/api/analytics?${q}`, { cache: "no-store" }), quiet);
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setData(body);
@@ -93,8 +101,8 @@ export function useAnalytics(days: number, license?: number) {
   }, [days, license]);
 
   useEffect(() => {
-    const first = setTimeout(load, 0);
-    const t = setInterval(load, 120_000);
+    const first = setTimeout(() => load(), 0);
+    const t = setInterval(() => load(true), 120_000);
     return () => {
       clearTimeout(first);
       clearInterval(t);

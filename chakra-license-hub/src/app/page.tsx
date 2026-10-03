@@ -5,7 +5,8 @@
 // only renders for a signed-in admin.
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 
 import CompaniesPage from "@/components/companies-page";
 import CompanyDetail from "@/components/company-detail";
@@ -53,19 +54,40 @@ function Shell() {
   const [now, setNow] = useState(() => Date.now());
 
   // Routing on the URL hash, so a refresh or a shared link keeps the page.
-  useEffect(() => {
-    const sync = () => {
-      setRoute(parseRoute(window.location.hash));
-      setMenuOpen(false);
-      window.scrollTo({ top: 0 });
+  // Page changes run inside a view transition: the browser cross-fades the
+  // page, and morphs elements that share a view-transition-name (a company
+  // card into the company page's header card, and back).
+  const routeRef = useRef<Route>({ page: "dashboard" });
+  const show = useCallback((r: Route, animate: boolean) => {
+    const before = routeRef.current;
+    if (routeHash(before) === routeHash(r)) return;
+    routeRef.current = r;
+    // Opening or closing a GPU's panel stays on the same page: no page transition.
+    const samePage = before.page === r.page && r.page === "gpus";
+    const update = () => {
+      flushSync(() => {
+        setRoute(r);
+        setMenuOpen(false);
+      });
+      if (!samePage) window.scrollTo({ top: 0 });
     };
-    const first = setTimeout(sync, 0);
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (animate && !samePage && !reduce && doc.startViewTransition) doc.startViewTransition(update);
+    else update();
+  }, []);
+
+  useEffect(() => {
+    const sync = () => show(parseRoute(window.location.hash), true);
+    const first = setTimeout(() => show(parseRoute(window.location.hash), false), 0);
     window.addEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
     return () => {
       clearTimeout(first);
       window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
     };
-  }, []);
+  }, [show]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 60_000);
@@ -77,18 +99,23 @@ function Shell() {
     };
   }, [router]);
 
-  const navigate = useCallback((r: Route) => {
-    window.location.hash = routeHash(r);
-  }, []);
+  const navigate = useCallback(
+    (r: Route) => {
+      const hash = routeHash(r);
+      if (window.location.hash !== hash) window.history.pushState(null, "", hash);
+      show(r, true);
+    },
+    [show],
+  );
 
   const toast = useCallback((text: string, tone: "error" | "success" = "error") => {
     setToastMsg({ text, tone });
     setTimeout(() => setToastMsg((t) => (t?.text === text ? null : t)), 3500);
   }, []);
 
-  const reloadClients = useCallback(async () => {
+  const reloadClients = useCallback(async (quiet = false) => {
     try {
-      const rows = await licenseApi<Client[]>("GET");
+      const rows = await licenseApi<Client[]>("GET", undefined, quiet);
       setClients(Array.isArray(rows) ? rows.map((r) => ({ ...r, month_minutes: Number(r.month_minutes) || 0 })) : []);
     } catch (e) {
       toast((e as Error).message);
@@ -98,12 +125,12 @@ function Shell() {
   }, [toast]);
 
   useEffect(() => {
-    const first = setTimeout(reloadClients, 0);
+    const first = setTimeout(() => reloadClients(), 0);
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
       .then((me) => me && setAdminEmail(me.email))
       .catch(() => {});
-    const t = setInterval(reloadClients, 120_000);
+    const t = setInterval(() => reloadClients(true), 120_000);
     return () => {
       clearTimeout(first);
       clearInterval(t);
@@ -147,6 +174,16 @@ function Shell() {
       ? { title: company?.company_name ?? "Company", subtitle: company ? `${company.package_name || "Essential"} package` : "" }
       : TITLES[route.page];
 
+  // The browser tab names the page: "Companies · Chakra Console".
+  // Set again shortly after: on a fresh load Next.js writes the layout's
+  // default title once the page has hydrated, over this one.
+  useEffect(() => {
+    const title = `${heading.title} · Chakra Console`;
+    document.title = title;
+    const again = setTimeout(() => (document.title = title), 400);
+    return () => clearTimeout(again);
+  }, [heading.title]);
+
   return (
     <HubContext.Provider value={hub}>
       <div className="min-h-screen bg-canvas text-ink flex">
@@ -178,17 +215,18 @@ function Shell() {
             subtitle={heading.subtitle}
             adminEmail={adminEmail}
             onLogout={logout}
-            onOpenGpus={() => navigate({ page: "gpus" })}
+            onOpenGpu={(node) => navigate({ page: "gpus", node })}
             onMenu={() => setMenuOpen(true)}
           />
           <div className="flex-1 px-4 md:px-8 py-6">
-            <div className="max-w-[1440px] mx-auto">
+            {/* Keyed per page, so each page fades in when opened. */}
+            <div key={route.page === "company" ? `company-${route.id}` : route.page} className="max-w-[1440px] mx-auto page-in">
               {route.page === "dashboard" && <DashboardPage />}
               {route.page === "companies" && <CompaniesPage />}
               {route.page === "company" && <CompanyDetail id={route.id} />}
               {route.page === "new" && <NewLicensePage />}
               {route.page === "packages" && <PackagesPage />}
-              {route.page === "gpus" && <GpuPage />}
+              {route.page === "gpus" && <GpuPage node={route.node} />}
               {route.page === "fleet" && <FleetPage />}
             </div>
           </div>
@@ -239,13 +277,16 @@ function Sidebar({ route, open, onClose }: { route: Route; open: boolean; onClos
       {open && <div className="fixed inset-0 bg-black/60 z-40 md:hidden" onClick={onClose} />}
       <aside
         className={cx(
-          "w-[248px] shrink-0 bg-panel border-r border-line flex flex-col h-screen z-50",
+          "w-[248px] shrink-0 bg-canvas border-r border-line flex flex-col h-screen z-50",
           "fixed md:sticky top-0 transition-transform md:translate-x-0",
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
         <div className="h-16 px-5 flex items-center justify-between border-b border-line">
-          <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={160} height={44} className="w-auto h-9 object-contain" priority />
+          <div className="flex flex-col">
+            <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={160} height={44} className="w-auto h-8 object-contain object-left" priority />
+            <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-3 mt-0.5 pl-0.5">Console</span>
+          </div>
           <button onClick={onClose} className="md:hidden text-ink-3 hover:text-ink" aria-label="Close menu">
             <X size={18} />
           </button>

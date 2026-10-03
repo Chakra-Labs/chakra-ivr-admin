@@ -1,7 +1,9 @@
 "use client";
 
-// GPU performance: one card per GPU (health, running since, live traffic,
-// latency, memory/CPU/RAM, uptime) plus 1 h – 7 d charts and the downtime log.
+// GPU performance, built to stay readable with dozens of GPUs: an overview,
+// filters (search, role, status, sort), one compact tile (or table row) per
+// GPU, worst first, and a side panel with the full detail and history for the
+// GPU you click (#gpus/<id>, so the header bell can open one directly).
 // Live numbers come from the controller's health probe; history from the
 // gateway's per-minute metrics (fleet_node_metrics).
 import { useEffect, useMemo, useState } from "react";
@@ -9,44 +11,82 @@ import { useEffect, useMemo, useState } from "react";
 import { ColumnChart, LineChart, StatusStrip } from "./charts";
 import { fleetApi, useFleet } from "./fleet-context";
 import { useHub } from "./hub-context";
-import { Activity, AlertOctagon, AlertTriangle, Clock, Cpu, RefreshCw, Server } from "./icons";
-import { Badge, Button, Card, Empty, ErrorBanner, Meter, MiniStat, Segmented, Stat, StatusPill, cx } from "./ui";
-import { PEAK } from "@/lib/fleet-health";
+import { Activity, AlertOctagon, AlertTriangle, ChevronRight, Clock, Cpu, RefreshCw, Search, Server } from "./icons";
+import { Badge, Button, Card, Drawer, Empty, ErrorBanner, Meter, MiniStat, Segmented, Skeleton, Spinner, Stat, StatusPill, cx, inputClass } from "./ui";
+import { PEAK, type Assessment, type NodeStatus } from "@/lib/fleet-health";
+import { useLoading } from "@/lib/loading";
 import { dateTime, duration, mb, ms, num, pct, timeOnly } from "@/lib/format";
 import { LINES_PER_GPU } from "@/lib/packages";
 import type { FleetMetrics, FleetNode, MetricPoint, NodeSummary } from "@/lib/types";
 
 type Range = 1 | 6 | 24 | 168;
+type View = "tiles" | "table";
+type StatusFilter = "all" | "down" | "peak" | "healthy" | "other";
+type SortKey = "status" | "load" | "latency" | "name";
 
-export default function GpuPage() {
+// Worst first: what needs a look sits at the top.
+const ORDER: Record<NodeStatus, number> = { down: 0, failed: 0, peak: 1, unknown: 2, pending: 3, draining: 4, healthy: 5 };
+const VIEW_KEY = "chakra.gpus.view";
+
+function bucket(status: NodeStatus): Exclude<StatusFilter, "all"> {
+  if (status === "down" || status === "failed") return "down";
+  if (status === "peak") return "peak";
+  if (status === "healthy") return "healthy";
+  return "other";
+}
+
+const ratio = (v?: number | null, max?: number | null) => (v != null && max ? v / max : null);
+
+export default function GpuPage({ node: openId }: { node?: number }) {
   const fleet = useFleet();
-  const { now } = useHub();
-  const [range, setRange] = useState<Range>(24);
-  const [own, setOwn] = useState<FleetMetrics | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const { now, navigate } = useHub();
+  const busy = useLoading();
+  const [query, setQuery] = useState("");
+  const [role, setRole] = useState<"all" | "stt" | "tts">("all");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [sort, setSort] = useState<SortKey>("status");
+  const [view, setView] = useState<View>("tiles");
 
-  // 24 h comes with the shared fleet data; other ranges are fetched here.
+  // The tiles/table choice is remembered in this browser only.
   useEffect(() => {
-    if (range === 24) return;
-    let live = true;
-    const load = () => fleetApi<FleetMetrics>(`metrics?hours=${range}`).then((m) => live && setOwn(m)).catch(() => {});
-    const first = setTimeout(load, 0);
-    const t = setInterval(load, 60_000);
-    return () => {
-      live = false;
-      clearTimeout(first);
-      clearInterval(t);
-    };
-  }, [range]);
+    const t = setTimeout(() => {
+      try {
+        if (localStorage.getItem(VIEW_KEY) === "table") setView("table");
+      } catch {}
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const changeView = (v: View) => {
+    setView(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {}
+  };
 
-  const metrics = range === 24 ? fleet.metrics : own?.hours === range ? own : null;
   const summaries = fleet.metrics?.summary ?? {};
   const nodes = fleet.nodes;
-  const current = nodes.find((n) => n.id === selected) ?? nodes[0];
+  const statusOf = (n: FleetNode): NodeStatus => fleet.assessments.get(n.id)?.status ?? "unknown";
+
+  const counts = { all: nodes.length, down: 0, peak: 0, healthy: 0, other: 0 };
+  for (const n of nodes) counts[bucket(statusOf(n))]++;
+
+  const q = query.trim().toLowerCase();
+  const shown = nodes
+    .filter((n) => role === "all" || n.role === role)
+    .filter((n) => status === "all" || bucket(statusOf(n)) === status)
+    .filter((n) => !q || n.name.toLowerCase().includes(q) || n.host.includes(q))
+    .sort((a, b) => {
+      const sa = summaries[String(a.id)];
+      const sb = summaries[String(b.id)];
+      if (sort === "load") return (fleet.assessments.get(b.id)?.load ?? -1) - (fleet.assessments.get(a.id)?.load ?? -1);
+      if (sort === "latency") return (sb?.p95_ms_5m ?? -1) - (sa?.p95_ms_5m ?? -1);
+      if (sort === "name") return a.name.localeCompare(b.name);
+      return ORDER[statusOf(a)] - ORDER[statusOf(b)] || a.name.localeCompare(b.name);
+    });
 
   const totalRpm = Object.values(summaries).reduce((a, s) => a + (s.requests_5m ?? 0), 0) / 5;
-  const latency = (role: "stt" | "tts") => {
-    const ss = nodes.filter((n) => n.role === role).map((n) => summaries[String(n.id)]).filter(Boolean) as NodeSummary[];
+  const latency = (r: "stt" | "tts") => {
+    const ss = nodes.filter((n) => n.role === r).map((n) => summaries[String(n.id)]).filter(Boolean) as NodeSummary[];
     const reqs = ss.reduce((a, s) => a + (s.requests_5m ?? 0), 0);
     const avg = reqs ? ss.reduce((a, s) => a + (s.avg_ms_5m ?? 0) * (s.requests_5m ?? 0), 0) / reqs : null;
     const p95 = ss.reduce<number | null>((a, s) => (s.p95_ms_5m == null ? a : Math.max(a ?? 0, s.p95_ms_5m)), null);
@@ -54,8 +94,14 @@ export default function GpuPage() {
   };
   const stt = latency("stt");
   const tts = latency("tts");
-  const healthy = nodes.filter((n) => ["healthy", "peak"].includes(fleet.assessments.get(n.id)?.status ?? "")).length;
-  const down = fleet.alerts.filter((a) => a.assessment.level === "down").length;
+
+  // The open GPU, and its neighbours in the current list for prev/next.
+  const open = openId != null ? nodes.find((n) => n.id === openId) : undefined;
+  const list = shown.some((n) => n.id === openId) ? shown : nodes;
+  const at = list.findIndex((n) => n.id === openId);
+  const prev = at > 0 ? list[at - 1] : undefined;
+  const next = at >= 0 && at < list.length - 1 ? list[at + 1] : undefined;
+  const openGpu = (id: number) => navigate({ page: "gpus", node: id });
 
   return (
     <div className="space-y-5">
@@ -64,51 +110,339 @@ export default function GpuPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <Stat
           label="GPUs healthy"
-          value={fleet.loaded ? `${healthy} / ${nodes.length}` : "–"}
-          sub={down ? `${down} down` : "All responding"}
+          loading={!fleet.loaded}
+          value={`${counts.healthy + counts.peak} / ${nodes.length}`}
+          sub={counts.down ? `${counts.down} down` : "All responding"}
           icon={<Server size={16} />}
-          tone={down ? "critical" : undefined}
+          tone={counts.down ? "critical" : undefined}
         />
-        <Stat label="Requests per minute" value={num(totalRpm, totalRpm < 10 ? 1 : 0)} sub="Average over the last 5 minutes" icon={<Activity size={16} />} />
-        <Stat label="STT response time" value={ms(stt.avg)} sub={`slowest 5%: ${ms(stt.p95)} · last 5 min`} icon={<Clock size={16} />} />
-        <Stat label="TTS response time" value={ms(tts.avg)} sub={`slowest 5%: ${ms(tts.p95)} · last 5 min`} icon={<Clock size={16} />} />
+        <Stat label="Requests per minute" loading={!fleet.metrics && !fleet.loaded} value={num(totalRpm, totalRpm < 10 ? 1 : 0)} sub="Whole fleet, last 5 minutes" icon={<Activity size={16} />} />
+        <Stat label="STT response time" loading={!fleet.metrics && !fleet.loaded} value={ms(stt.avg)} sub={`slowest 5%: ${ms(stt.p95)} · last 5 min`} icon={<Clock size={16} />} />
+        <Stat label="TTS response time" loading={!fleet.metrics && !fleet.loaded} value={ms(tts.avg)} sub={`slowest 5%: ${ms(tts.p95)} · last 5 min`} icon={<Clock size={16} />} />
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="text-[12px] text-ink-3">
-          Live values refresh every 30 s{fleet.updatedAt ? ` · last check ${timeOnly(new Date(fleet.updatedAt).toISOString())}` : ""}
+      {/* Filters: one row above the list they scope. Status chips double as counts. */}
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="relative">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-3" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a GPU (name or IP)" aria-label="Find a GPU" className={cx(inputClass, "pl-9 w-56")} />
         </div>
-        <Button size="sm" onClick={() => fleet.refresh()}>
-          <RefreshCw size={13} /> Refresh now
-        </Button>
+        <Segmented label="Role" value={role} onChange={setRole} options={[{ value: "all", label: "All" }, { value: "stt", label: "STT" }, { value: "tts", label: "TTS" }]} />
+        <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Status">
+          {(
+            [
+              ["all", "All", "neutral"],
+              ["down", "Down", "critical"],
+              ["peak", "At peak", "warning"],
+              ["healthy", "Healthy", "good"],
+              ["other", "Draining / other", "info"],
+            ] as const
+          ).map(([key, label, tone]) => (
+            <button
+              key={key}
+              role="radio"
+              aria-checked={status === key}
+              onClick={() => setStatus(key)}
+              className={cx(
+                "h-8 px-2.5 rounded-lg border text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors",
+                status === key ? "bg-panel-3 border-line-strong text-ink" : "border-line text-ink-2 hover:text-ink hover:border-line-strong",
+              )}
+            >
+              {key !== "all" && <Dot tone={tone} pulse={key === "down" && counts.down > 0} />}
+              {label}
+              <span className={cx("tabular text-[11px]", key === "down" && counts.down ? "text-critical font-semibold" : "text-ink-3")}>{counts[key]}</span>
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} aria-label="Sort GPUs" className={cx(inputClass, "w-auto h-8 text-[12px]")}>
+            <option value="status">Sort: needs attention</option>
+            <option value="load">Sort: busiest</option>
+            <option value="latency">Sort: slowest</option>
+            <option value="name">Sort: name</option>
+          </select>
+          <Segmented
+            label="View"
+            value={view}
+            onChange={changeView}
+            options={[
+              { value: "tiles", label: "Tiles" },
+              { value: "table", label: "Table" },
+            ]}
+          />
+          <Button size="sm" onClick={() => fleet.refresh()} title="Live values also refresh every 30 s">
+            {busy ? <Spinner size={13} /> : <RefreshCw size={13} />} Refresh
+          </Button>
+        </div>
       </div>
 
       {!fleet.loaded ? (
-        <Empty>Checking the GPUs…</Empty>
-      ) : nodes.length === 0 ? (
-        <Empty>No GPUs in the fleet yet. Add one in GPU fleet.</Empty>
-      ) : (
-        <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
-          {nodes.map((n) => (
-            <NodeCard
-              key={n.id}
-              node={n}
-              summary={summaries[String(n.id)]}
-              series={fleet.metrics?.series[String(n.id)] ?? []}
-              bucketMinutes={fleet.metrics?.bucket_minutes ?? 5}
-              checkedAt={fleet.updatedAt}
-              now={now}
-              selected={current?.id === n.id}
-              onSelect={() => setSelected(n.id)}
-            />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          {Array.from({ length: 8 }, (_, i) => (
+            <Skeleton key={i} className="h-[168px] rounded-xl" />
           ))}
         </div>
+      ) : nodes.length === 0 ? (
+        <Empty>No GPUs in the fleet yet. Add one in GPU fleet.</Empty>
+      ) : shown.length === 0 ? (
+        <Empty>No GPU matches these filters.</Empty>
+      ) : view === "tiles" ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+          {shown.map((n, i) => (
+            <GpuTile key={n.id} node={n} a={fleet.assessments.get(n.id)} s={summaries[String(n.id)]} index={i} onOpen={() => openGpu(n.id)} />
+          ))}
+        </div>
+      ) : (
+        <GpuTable nodes={shown} summaries={summaries} onOpen={openGpu} />
       )}
+      <div className="text-[11px] text-ink-3">
+        Showing {shown.length} of {nodes.length} GPUs · live values refresh every 30 s
+        {fleet.updatedAt ? ` · last check ${timeOnly(new Date(fleet.updatedAt).toISOString())}` : ""}
+      </div>
 
-      {current && (
+      <Card title="Downtime log" subtitle="Minutes when every health check failed, last 7 days">
+        <DowntimeTable metrics={fleet.metrics} nodes={nodes} onOpen={openGpu} />
+      </Card>
+
+      {open && (
+        // Not keyed by GPU: Prev/Next swap the content without replaying the slide-in.
+        <GpuDrawer
+          node={open}
+          summary={summaries[String(open.id)]}
+          metrics24={fleet.metrics}
+          checkedAt={fleet.updatedAt}
+          now={now}
+          position={at >= 0 ? `${at + 1} of ${list.length}` : undefined}
+          onPrev={prev ? () => openGpu(prev.id) : undefined}
+          onNext={next ? () => openGpu(next.id) : undefined}
+          onClose={() => navigate({ page: "gpus" })}
+        />
+      )}
+    </div>
+  );
+}
+
+function Dot({ tone, pulse = false }: { tone: "critical" | "warning" | "good" | "info" | "neutral"; pulse?: boolean }) {
+  const bg = { critical: "bg-critical", warning: "bg-warning", good: "bg-good", info: "bg-series-1", neutral: "bg-ink-3" }[tone];
+  return <span aria-hidden="true" className={cx("w-2 h-2 rounded-full shrink-0", bg, pulse && "pulse-critical")} />;
+}
+
+const STATUS_TONE: Record<NodeStatus, "critical" | "warning" | "good" | "info" | "neutral"> = {
+  down: "critical",
+  failed: "critical",
+  peak: "warning",
+  healthy: "good",
+  draining: "info",
+  pending: "warning",
+  unknown: "neutral",
+};
+
+function MiniBar({ label, value }: { label: string; value: number | null }) {
+  const v = value == null ? null : Math.max(0, Math.min(1, value));
+  const color = v == null ? "transparent" : v >= 0.9 ? "var(--critical)" : v >= 0.75 ? "var(--warning)" : "var(--accent)";
+  return (
+    <div className="flex items-center gap-2 text-[10px]">
+      <span className="w-8 text-ink-3">{label}</span>
+      <span className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+        <span className="block h-full rounded-full transition-[width] duration-700" style={{ width: `${(v ?? 0) * 100}%`, background: color }} />
+      </span>
+      <span className="w-8 text-right text-ink-2 tabular">{v == null ? "–" : `${Math.round(v * 100)}%`}</span>
+    </div>
+  );
+}
+
+function GpuTile({ node, a, s, index, onOpen }: { node: FleetNode; a?: Assessment; s?: NodeSummary; index: number; onOpen: () => void }) {
+  const h = node.health;
+  const st = a?.status ?? "unknown";
+  const down = a?.level === "down";
+  const rpm = s?.requests_5m != null ? s.requests_5m / 5 : null;
+  return (
+    <button
+      onClick={onOpen}
+      // Tiles rise in one after another (capped so 50 GPUs don't take long).
+      style={{ animationDelay: `${Math.min(index, 12) * 25}ms` }}
+      className={cx(
+        "rise-in text-left bg-panel border rounded-xl p-3.5 min-w-0 transition-[border-color,transform,background-color] duration-200 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-accent",
+        down ? "border-critical/50 bg-critical/[0.05] hover:border-critical" : a?.level === "peak" ? "border-warning/40 hover:border-warning/70" : "border-line hover:border-line-strong",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 min-w-0">
+          <Dot tone={STATUS_TONE[st]} pulse={down} />
+          <span className="text-[13px] font-semibold text-ink truncate">{node.name}</span>
+        </span>
+        <span className={cx("text-[10px] font-mono font-semibold", node.role === "stt" ? "text-series-1" : "text-serious")}>{node.role.toUpperCase()}</span>
+      </div>
+      <div className="text-[11px] text-ink-3 font-mono truncate mt-0.5">
+        {node.host}
+        {h?.gpu ? ` · ${h.gpu.replace("NVIDIA ", "").replace("RTX ", "")}` : ""}
+      </div>
+      <div className={cx("text-[11px] mt-1.5 h-4 truncate", down ? "text-critical" : a?.level === "peak" ? "text-warning" : "text-ink-3")}>
+        {a?.reasons[0] ?? (st === "draining" ? "Draining · takes no calls" : st === "pending" ? "Deploying…" : st === "healthy" ? "Healthy" : "No data yet")}
+      </div>
+      <div className="grid grid-cols-3 gap-2 mt-3">
+        <TileFigure label="Load" value={a?.load != null ? pct(a.load) : "–"} warn={(a?.load ?? 0) >= PEAK.loadRatio} />
+        <TileFigure label="p95" value={ms(s?.p95_ms_5m)} warn={s?.p95_ms_5m != null && s.p95_ms_5m > PEAK.p95Ms[node.role]} />
+        <TileFigure label="req/min" value={rpm == null ? "–" : num(rpm, rpm < 10 ? 1 : 0)} />
+      </div>
+      <div className="mt-3 space-y-1">
+        <MiniBar label="GPU" value={ratio(h?.vram_mb, h?.vram_total_mb)} />
+        <MiniBar label="CPU" value={h?.host?.cpu_pct != null ? h.host.cpu_pct / 100 : null} />
+        <MiniBar label="RAM" value={ratio(h?.host?.ram_used_mb, h?.host?.ram_total_mb)} />
+      </div>
+    </button>
+  );
+}
+
+function TileFigure({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] text-ink-3">{label}</div>
+      <div className={cx("text-[13px] font-semibold tabular truncate", warn ? "text-warning" : "text-ink")}>{value}</div>
+    </div>
+  );
+}
+
+function GpuTable({ nodes, summaries, onOpen }: { nodes: FleetNode[]; summaries: Record<string, NodeSummary>; onOpen: (id: number) => void }) {
+  const { assessments } = useFleet();
+  return (
+    <div className="bg-panel border border-line rounded-2xl overflow-hidden">
+      <div className="overflow-x-auto custom-scrollbar">
+        <table className="w-full text-[12px] min-w-[960px]">
+          <thead className="bg-panel-2 text-ink-3 text-left">
+            <tr>
+              {["GPU", "Status", "Load", "req/min", "Avg · 5 min", "p95 · 5 min", "GPU mem", "CPU", "RAM", "Up 24 h", "Running"].map((h, i) => (
+                <th key={h} className={cx("px-3 py-2.5 font-medium whitespace-nowrap", i > 1 && "text-right")}>{h}</th>
+              ))}
+              <th className="w-6" />
+            </tr>
+          </thead>
+          <tbody className="tabular">
+            {nodes.map((n) => {
+              const a = assessments.get(n.id);
+              const s = summaries[String(n.id)];
+              const h = n.health;
+              const rpm = s?.requests_5m != null ? s.requests_5m / 5 : null;
+              const cell = (v: number | null, warnAt = 0.75, critAt = 0.9) => (
+                <span className={cx(v == null ? "text-ink-3" : v >= critAt ? "text-critical" : v >= warnAt ? "text-warning" : "text-ink")}>{v == null ? "–" : pct(v)}</span>
+              );
+              return (
+                <tr
+                  key={n.id}
+                  tabIndex={0}
+                  onClick={() => onOpen(n.id)}
+                  onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onOpen(n.id)}
+                  className={cx(
+                    "border-t border-line cursor-pointer hover:bg-white/[0.03] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
+                    a?.level === "down" && "bg-critical/[0.06]",
+                  )}
+                >
+                  <td className="px-3 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <Dot tone={STATUS_TONE[a?.status ?? "unknown"]} pulse={a?.level === "down"} />
+                      <span className="text-ink font-medium">{n.name}</span>
+                      <span className={cx("text-[10px] font-mono", n.role === "stt" ? "text-series-1" : "text-serious")}>{n.role.toUpperCase()}</span>
+                    </div>
+                    <div className="text-[11px] text-ink-3 font-mono pl-4">{n.host}</div>
+                  </td>
+                  <td className="px-3 py-2.5"><StatusPill status={a?.status ?? "unknown"} /></td>
+                  <td className="px-3 py-2.5 text-right">{cell(a?.load ?? null, 0.6, PEAK.loadRatio)}</td>
+                  <td className="px-3 py-2.5 text-right text-ink">{rpm == null ? "–" : num(rpm, rpm < 10 ? 1 : 0)}</td>
+                  <td className="px-3 py-2.5 text-right text-ink">{ms(s?.avg_ms_5m)}</td>
+                  <td className={cx("px-3 py-2.5 text-right", s?.p95_ms_5m != null && s.p95_ms_5m > PEAK.p95Ms[n.role] ? "text-warning" : "text-ink")}>{ms(s?.p95_ms_5m)}</td>
+                  <td className="px-3 py-2.5 text-right">{cell(ratio(h?.vram_mb, h?.vram_total_mb), 0.85, PEAK.vram)}</td>
+                  <td className="px-3 py-2.5 text-right">{cell(h?.host?.cpu_pct != null ? h.host.cpu_pct / 100 : null)}</td>
+                  <td className="px-3 py-2.5 text-right">{cell(ratio(h?.host?.ram_used_mb, h?.host?.ram_total_mb), 0.8, PEAK.ram)}</td>
+                  <td className="px-3 py-2.5 text-right text-ink">{pct(s?.uptime_24h, 1)}</td>
+                  <td className="px-3 py-2.5 text-right text-ink-2">{h?.uptime_s != null ? duration(h.uptime_s) : "–"}</td>
+                  <td className="pr-3 text-ink-3"><ChevronRight size={14} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function GpuDrawer({
+  node,
+  summary,
+  metrics24,
+  checkedAt,
+  now,
+  position,
+  onPrev,
+  onNext,
+  onClose,
+}: {
+  node: FleetNode;
+  summary?: NodeSummary;
+  metrics24: FleetMetrics | null;
+  checkedAt: number | null;
+  now: number;
+  position?: string;
+  onPrev?: () => void;
+  onNext?: () => void;
+  onClose: () => void;
+}) {
+  const [range, setRange] = useState<Range>(24);
+  const [own, setOwn] = useState<FleetMetrics | null>(null);
+
+  // 24 h comes with the shared fleet data; other ranges are fetched for the panel.
+  useEffect(() => {
+    if (range === 24) return;
+    let live = true;
+    const load = (quiet: boolean) =>
+      fleetApi<FleetMetrics>(`metrics?hours=${range}`, undefined, quiet).then((m) => live && setOwn(m)).catch(() => {});
+    const first = setTimeout(() => load(false), 0);
+    const t = setInterval(() => load(true), 60_000);
+    return () => {
+      live = false;
+      clearTimeout(first);
+      clearInterval(t);
+    };
+  }, [range]);
+  const metrics = range === 24 ? metrics24 : own?.hours === range ? own : null;
+
+  // ← / → step through GPUs while the panel is open.
+  useEffect(() => {
+    const keys = (e: KeyboardEvent) => {
+      if (e.target instanceof Element && e.target.closest("input, select, textarea")) return;
+      if (e.key === "ArrowLeft" && onPrev) onPrev();
+      if (e.key === "ArrowRight" && onNext) onNext();
+    };
+    document.addEventListener("keydown", keys);
+    return () => document.removeEventListener("keydown", keys);
+  }, [onPrev, onNext]);
+
+  return (
+    <Drawer
+      title={
+        <span className="flex items-center gap-2">
+          {node.name}
+          <span className={cx("text-[11px] font-mono", node.role === "stt" ? "text-series-1" : "text-serious")}>{node.role.toUpperCase()}</span>
+        </span>
+      }
+      subtitle={position ? `${position} · use ← → to move between GPUs` : undefined}
+      onClose={onClose}
+      actions={
+        <>
+          <Button size="sm" variant="ghost" disabled={!onPrev} onClick={onPrev} aria-label="Previous GPU">
+            <ChevronRight size={14} className="rotate-180" /> Prev
+          </Button>
+          <Button size="sm" variant="ghost" disabled={!onNext} onClick={onNext} aria-label="Next GPU">
+            Next <ChevronRight size={14} />
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-5">
+        <NodeCard node={node} summary={summary} series={metrics24?.series[String(node.id)] ?? []} bucketMinutes={metrics24?.bucket_minutes ?? 5} checkedAt={checkedAt} now={now} />
         <Card
-          title={`History · ${current.name}`}
-          subtitle="Pick a GPU above to switch. Times are Sri Lanka time."
+          title="History"
+          subtitle="Times are Sri Lanka time"
           action={
             <Segmented
               label="History range"
@@ -123,14 +457,10 @@ export default function GpuPage() {
             />
           }
         >
-          {metrics ? <NodeHistory node={current} metrics={metrics} now={now} /> : <Empty>Loading history…</Empty>}
+          {metrics ? <NodeHistory node={node} metrics={metrics} now={now} /> : <Skeleton className="h-[440px]" />}
         </Card>
-      )}
-
-      <Card title="Downtime log" subtitle="Minutes when every health check failed, last 7 days">
-        <DowntimeTable metrics={fleet.metrics} nodes={nodes} />
-      </Card>
-    </div>
+      </div>
+    </Drawer>
   );
 }
 
@@ -141,8 +471,6 @@ function NodeCard({
   bucketMinutes,
   checkedAt,
   now,
-  selected,
-  onSelect,
 }: {
   node: FleetNode;
   summary?: NodeSummary;
@@ -150,8 +478,6 @@ function NodeCard({
   bucketMinutes: number;
   checkedAt: number | null;
   now: number;
-  selected: boolean;
-  onSelect: () => void;
 }) {
   const { assessments } = useFleet();
   const a = assessments.get(node.id);
@@ -192,14 +518,12 @@ function NodeCard({
     <article
       className={cx(
         "bg-panel border rounded-2xl p-5 space-y-4 transition-colors min-w-0",
-        isDown ? "border-critical/50 bg-critical/[0.04]" : a?.level === "peak" ? "border-warning/40" : selected ? "border-line-strong" : "border-line",
+        isDown ? "border-critical/50 bg-critical/[0.04]" : a?.level === "peak" ? "border-warning/40" : "border-line",
       )}
     >
       <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-[15px] font-semibold text-ink">{node.name}</h3>
-            <Badge tone={node.role === "stt" ? "info" : "serious"}>{node.role.toUpperCase()}</Badge>
             <StatusPill status={a?.status ?? "unknown"} />
             {node.state === "draining" && a?.status !== "draining" && <Badge tone="info">Draining</Badge>}
           </div>
@@ -208,9 +532,6 @@ function NodeCard({
             {h?.gpu ? ` · ${h.gpu.replace("NVIDIA ", "")}` : ""}
           </div>
         </div>
-        <Button size="sm" variant={selected ? "secondary" : "ghost"} onClick={onSelect}>
-          {selected ? "Showing history" : "Show history"}
-        </Button>
       </header>
 
       {a && a.reasons.length > 0 && (
@@ -386,7 +707,8 @@ function NodeHistory({ node, metrics, now }: { node: FleetNode; metrics: FleetMe
   );
 }
 
-function DowntimeTable({ metrics, nodes }: { metrics: FleetMetrics | null; nodes: FleetNode[] }) {
+function DowntimeTable({ metrics, nodes, onOpen }: { metrics: FleetMetrics | null; nodes: FleetNode[]; onOpen: (id: number) => void }) {
+  const [all, setAll] = useState(false);
   if (!metrics) return <Empty>No history yet.</Empty>;
   const names = new Map([...metrics.nodes, ...nodes].map((n) => [n.id, n.name]));
   if (metrics.downtime.length === 0) return <Empty>No downtime in the last 7 days.</Empty>;
@@ -402,9 +724,15 @@ function DowntimeTable({ metrics, nodes }: { metrics: FleetMetrics | null; nodes
           </tr>
         </thead>
         <tbody className="tabular">
-          {metrics.downtime.map((d) => (
+          {(all ? metrics.downtime : metrics.downtime.slice(0, 8)).map((d) => (
             <tr key={`${d.node_id}-${d.started_at}`} className={cx("border-b border-line last:border-0", d.ongoing && "bg-critical/[0.06]")}>
-              <td className="py-2.5 pr-3 text-ink">{names.get(d.node_id) ?? `node #${d.node_id}`}</td>
+              <td className="py-2.5 pr-3">
+                {nodes.some((n) => n.id === d.node_id) ? (
+                  <button onClick={() => onOpen(d.node_id)} className="text-ink hover:text-accent transition-colors">{names.get(d.node_id)}</button>
+                ) : (
+                  <span className="text-ink-2">{names.get(d.node_id) ?? `node #${d.node_id}`} (removed)</span>
+                )}
+              </td>
               <td className="py-2.5 pr-3 text-ink-2">{dateTime(d.started_at)}</td>
               <td className="py-2.5 pr-3">{d.ongoing ? <Badge tone="critical"><AlertOctagon size={11} /> Still down</Badge> : <span className="text-ink-2">{dateTime(d.ended_at)}</span>}</td>
               <td className="py-2.5 text-right text-ink">{duration(d.minutes * 60)}</td>
@@ -412,6 +740,13 @@ function DowntimeTable({ metrics, nodes }: { metrics: FleetMetrics | null; nodes
           ))}
         </tbody>
       </table>
+      {metrics.downtime.length > 8 && (
+        <div className="pt-3">
+          <Button size="sm" variant="ghost" onClick={() => setAll(!all)}>
+            {all ? "Show fewer" : `Show all ${metrics.downtime.length}`}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

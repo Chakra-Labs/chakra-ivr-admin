@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { licenseApi, useHub } from "./hub-context";
 import { Check, ChevronRight, Copy, Key, Plus } from "./icons";
-import { Button, Card, cx, inputClass } from "./ui";
+import { Button, Card, Spinner, cx, inputClass } from "./ui";
 import { compact, num } from "@/lib/format";
 import { gpusFor } from "@/lib/packages";
 import type { Client } from "@/lib/types";
@@ -77,7 +77,7 @@ export default function NewLicensePage() {
             </div>
           </div>
           <Button variant="primary" className="w-full h-10" onClick={create} disabled={busy}>
-            {busy ? "Creating…" : <><Plus size={15} /> Create licence and key</>}
+            {busy ? <><Spinner size={15} /> Creating…</> : <><Plus size={15} /> Create licence and key</>}
           </Button>
         </div>
       </Card>

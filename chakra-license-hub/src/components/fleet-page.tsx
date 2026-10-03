@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { fleetApi, useFleet } from "./fleet-context";
 import { Check, Copy, RefreshCw, X, Zap } from "./icons";
-import { Badge, Button, Card, Empty, ErrorBanner, StatusPill, cx, inputClass } from "./ui";
+import { Badge, Button, Card, Empty, ErrorBanner, LinesSkeleton, Spinner, StatusPill, cx, inputClass } from "./ui";
 import { num } from "@/lib/format";
 import type { FleetNode } from "@/lib/types";
 
@@ -296,7 +296,7 @@ export default function FleetPage() {
             )}
           </div>
           <Button variant="primary" className="w-full h-10 mt-3" onClick={addNode} disabled={busy === "add"}>
-            {busy === "add" ? "Starting…" : <><Zap size={15} /> Add and deploy</>}
+            {busy === "add" ? <><Spinner size={15} /> Starting…</> : <><Zap size={15} /> Add and deploy</>}
           </Button>
           <div className="mt-4">
             <div className="text-[12px] text-ink-2 mb-1.5">Chakra fleet SSH public key</div>
@@ -324,7 +324,7 @@ export default function FleetPage() {
               </thead>
               <tbody>
                 {!loaded && (
-                  <tr><td colSpan={4}><Empty>Loading…</Empty></td></tr>
+                  <tr><td colSpan={4} className="py-4"><LinesSkeleton rows={3} /></td></tr>
                 )}
                 {loaded && nodes.length === 0 && (
                   <tr><td colSpan={4}><Empty>No GPU nodes yet.</Empty></td></tr>

@@ -6,8 +6,8 @@ import { ColumnChart, Heatmap } from "./charts";
 import { RequestsAndErrors, monthProgress } from "./dashboard-page";
 import { useFleet } from "./fleet-context";
 import { licenseApi, useAnalytics, useHub } from "./hub-context";
-import { AlertTriangle, ArrowLeft, Calendar, Clock, Gauge, Key, RefreshCw, Trash2, Zap } from "./icons";
-import { Badge, Button, Card, Empty, ErrorBanner, KeyValue, Meter, MiniStat, Segmented, Stat, cx, inputClass } from "./ui";
+import { AlertTriangle, ArrowLeft, Building, Calendar, Clock, Gauge, Key, RefreshCw, Trash2, Zap } from "./icons";
+import { Badge, Button, Card, ChartSkeleton, Empty, ErrorBanner, KeyValue, LinesSkeleton, Meter, MiniStat, Segmented, Skeleton, Stat, Spinner, cx, inputClass } from "./ui";
 import { ago, compact, dateOnly, dateTime, dayLabel, minutes, num, pct, signedPct } from "@/lib/format";
 import { INFLIGHT_PER_LINE, findPackage, gpusFor, packageLines, packageQuota } from "@/lib/packages";
 import type { Client, LicenseUsage } from "@/lib/types";
@@ -29,7 +29,7 @@ export default function CompanyDetail({ id }: { id: number }) {
   const { data, error } = useAnalytics(days, id);
   const client = clients.find((c) => c.id === id);
 
-  if (!clientsLoaded) return <Empty>Loading…</Empty>;
+  if (!clientsLoaded) return <CompanySkeleton />;
   if (!client) {
     return (
       <div className="space-y-4">
@@ -48,22 +48,45 @@ export default function CompanyDetail({ id }: { id: number }) {
   const errorRate = u.month_requests ? u.month_errors / u.month_requests : 0;
   const daily = data?.daily ?? [];
   const labels = daily.map((d) => dayLabel(d.day));
+  const waiting = !data && !error;
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <BackLink onClick={() => navigate({ page: "companies" })} />
-        <div className="flex items-center gap-2">
-          <Badge tone="accent">{client.package_name || "Essential"}</Badge>
-          <Badge tone={client.is_active ? "good" : "critical"}>{client.is_active ? "Active" : "Suspended"}</Badge>
+      <BackLink onClick={() => navigate({ page: "companies" })} />
+
+      {/* Shares its view-transition-name with this company's card on the
+          Companies page, so opening a card grows it into this header. */}
+      <section
+        className="bg-panel border border-line rounded-2xl p-5 flex flex-wrap items-center gap-4"
+        style={{ viewTransitionName: `company-${client.id}` }}
+      >
+        <div className="w-12 h-12 rounded-xl bg-panel-3 border border-line flex items-center justify-center text-accent shrink-0">
+          <Building size={20} />
         </div>
-      </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[20px] font-semibold text-ink truncate">{client.company_name}</h2>
+          <div className="flex flex-wrap items-center gap-2 mt-1.5">
+            <Badge tone="accent">{client.package_name || "Essential"}</Badge>
+            <Badge tone={client.is_active ? "good" : "critical"}>{client.is_active ? "Active" : "Suspended"}</Badge>
+            <span className="text-[12px] text-ink-3 font-mono">{client.token_prefix ?? "chk_live_"}…</span>
+          </div>
+        </div>
+        <div className="w-full sm:w-64">
+          <Meter
+            value={u.month_minutes}
+            max={quota}
+            label="This month"
+            detail={data ? `${minutes(u.month_minutes)} / ${compact(quota)} min` : "…"}
+          />
+        </div>
+      </section>
 
       <ErrorBanner message={error} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <Stat
           label="Speech minutes this month"
+          loading={waiting}
           value={minutes(u.month_minutes)}
           sub={`${pct(u.month_minutes / quota)} of ${compact(quota)} min`}
           icon={<Clock size={16} />}
@@ -71,12 +94,14 @@ export default function CompanyDetail({ id }: { id: number }) {
         />
         <Stat
           label="Requests this month"
+          loading={waiting}
           value={compact(u.month_requests)}
           delta={{ ratio: change(u.month_requests, u.last_mtd_requests), label: "vs same days last month" }}
           icon={<Zap size={16} />}
         />
         <Stat
           label="Error rate this month"
+          loading={waiting}
           value={pct(errorRate, 1)}
           sub={`${num(u.month_errors)} failed · ${num(u.month_rejected)} refused at line limit`}
           icon={<AlertTriangle size={16} />}
@@ -84,6 +109,7 @@ export default function CompanyDetail({ id }: { id: number }) {
         />
         <Stat
           label="Usage resets in"
+          loading={waiting}
           value={daysLeft == null ? "–" : `${daysLeft} day${daysLeft === 1 ? "" : "s"}`}
           sub={monthEnd ? `on ${dateOnly(monthEnd.toISOString())}` : undefined}
           icon={<Calendar size={16} />}
@@ -156,19 +182,23 @@ export default function CompanyDetail({ id }: { id: number }) {
           title="Speech usage"
           subtitle={`STT ${minutes(u.month_stt_min)} min · TTS ${minutes(u.month_tts_min)} min this month`}
         >
-          <ColumnChart
-            labels={labels}
-            tooltipLabels={daily.map((d) => d.day)}
-            series={[
-              { key: "stt", label: "STT", color: "var(--series-1)", values: daily.map((d) => d.stt_min) },
-              { key: "tts", label: "TTS", color: "var(--series-2)", values: daily.map((d) => d.tts_min) },
-            ]}
-            unit=" min"
-            height={230}
-          />
+          {!data ? (
+            <ChartSkeleton height={230} bars={30} />
+          ) : (
+            <ColumnChart
+              labels={labels}
+              tooltipLabels={daily.map((d) => d.day)}
+              series={[
+                { key: "stt", label: "STT", color: "var(--series-1)", values: daily.map((d) => d.stt_min) },
+                { key: "tts", label: "TTS", color: "var(--series-2)", values: daily.map((d) => d.tts_min) },
+              ]}
+              unit=" min"
+              height={230}
+            />
+          )}
         </Card>
         <Card className="xl:col-span-5" title="Busiest hours" subtitle="When this company's callers use the line (last 30 days)">
-          <Heatmap cells={data?.heatmap ?? []} format={(v) => `${minutes(v)} min`} />
+          {!data ? <Skeleton className="h-[230px]" /> : <Heatmap cells={data.heatmap} format={(v) => `${minutes(v)} min`} />}
         </Card>
       </div>
 
@@ -314,7 +344,7 @@ function ManageLicense({ client }: { client: Client }) {
               disabled={!name.trim() || name.trim() === client.company_name || busy !== null}
               onClick={() => update({ action: "edit", companyName: name.trim() }, "Name")}
             >
-              Save
+              {busy === "Name" && <Spinner size={13} />} Save
             </Button>
           </div>
         </div>
@@ -333,7 +363,7 @@ function ManageLicense({ client }: { client: Client }) {
               disabled={pkg === client.package_name || busy !== null}
               onClick={() => update({ action: "package", packageName: pkg }, "Package")}
             >
-              Save
+              {busy === "Package" && <Spinner size={13} />} Save
             </Button>
           </div>
           <p className="text-[11px] text-ink-3 mt-1.5">The GPU fleet re-sizes from packages, so check GPU fleet after an upgrade.</p>
@@ -372,7 +402,7 @@ function ManageLicense({ client }: { client: Client }) {
                 setBusy(null);
               }}
             >
-              <RefreshCw size={13} /> {busy === "rotate" ? "Rotating…" : "Rotate key"}
+              {busy === "rotate" ? <Spinner size={13} /> : <RefreshCw size={13} />} {busy === "rotate" ? "Rotating…" : "Rotate key"}
             </Button>
           </div>
           <p className="text-[11px] text-ink-3 mt-2">
@@ -387,5 +417,29 @@ function ManageLicense({ client }: { client: Client }) {
         </div>
       </div>
     </Card>
+  );
+}
+
+function CompanySkeleton() {
+  return (
+    <div className="space-y-5" aria-busy="true">
+      <Skeleton className="h-7 w-32" />
+      <Skeleton className="h-[88px] rounded-2xl" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {[0, 1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-[112px] rounded-2xl" />
+        ))}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="bg-panel border border-line rounded-2xl p-5">
+            <LinesSkeleton rows={5} />
+          </div>
+        ))}
+      </div>
+      <div className="bg-panel border border-line rounded-2xl p-5">
+        <ChartSkeleton height={230} bars={30} />
+      </div>
+    </div>
   );
 }

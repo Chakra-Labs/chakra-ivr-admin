@@ -6,7 +6,7 @@ import { BarList, ColumnChart, Heatmap } from "./charts";
 import { useFleet } from "./fleet-context";
 import { useAnalytics, useHub } from "./hub-context";
 import { AlertOctagon, AlertTriangle, Building, CheckCircle, ChevronRight, Clock, Server, Zap } from "./icons";
-import { Badge, Button, Card, Empty, ErrorBanner, Meter, MiniStat, Ring, Segmented, Stat, cx } from "./ui";
+import { Badge, Button, Card, ChartSkeleton, Empty, ErrorBanner, LinesSkeleton, Meter, MiniStat, Ring, Segmented, Skeleton, Stat, cx } from "./ui";
 import { gpuPrice } from "@/lib/fleet-health";
 import { compact, dayLabel, money, minutes, num, pct, signedPct } from "@/lib/format";
 import { packageQuota } from "@/lib/packages";
@@ -26,10 +26,11 @@ export function monthProgress(a: Analytics | null) {
 }
 
 export default function DashboardPage() {
-  const { clients, packages, navigate } = useHub();
+  const { clients, clientsLoaded, packages, navigate } = useHub();
   const fleet = useFleet();
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const { data, error } = useAnalytics(days);
+  const waiting = !data && !error;
 
   const usage = useMemo(() => new Map((data?.licenses ?? []).map((l) => [l.license_id, l])), [data]);
   const sum = (k: keyof LicenseUsage) => (data?.licenses ?? []).reduce((a, l) => a + (Number(l[k]) || 0), 0);
@@ -95,18 +96,21 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <Stat
           label="Speech minutes this month"
+          loading={waiting}
           value={minutes(monthMinutes)}
           delta={{ ratio: change(monthMinutes, sum("last_mtd_minutes")), label: "vs same days last month" }}
           icon={<Clock size={16} />}
         />
         <Stat
           label="Requests this month"
+          loading={waiting}
           value={compact(monthRequests)}
           sub={monthRequests ? `${pct(monthErrors / monthRequests, 1)} failed` : "No requests yet"}
           icon={<Zap size={16} />}
         />
         <Stat
           label="Active companies"
+          loading={waiting}
           value={`${activeCompanies}`}
           sub={`${clients.filter((c) => c.is_active).length} active licences · ${clients.length} total`}
           delta={lastActiveCompanies || activeCompanies ? { ratio: change(activeCompanies, lastActiveCompanies), label: "vs last month" } : undefined}
@@ -114,7 +118,8 @@ export default function DashboardPage() {
         />
         <Stat
           label="GPUs healthy"
-          value={fleet.loaded ? `${healthyGpus} / ${fleet.nodes.length}` : "–"}
+          loading={!fleet.loaded}
+          value={`${healthyGpus} / ${fleet.nodes.length}`}
           sub={downGpus ? `${downGpus} down — see alerts` : fleet.error ? "Fleet controller unreachable" : "Every GPU responding"}
           icon={<Server size={16} />}
           tone={downGpus ? "critical" : undefined}
@@ -123,7 +128,7 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
         <Card className="xl:col-span-8" title="Daily speech usage" subtitle={`Minutes of caller audio (STT) and agent speech (TTS), last ${days} days`}>
-          <ColumnChart
+          {!data ? <ChartSkeleton height={240} bars={30} /> : <ColumnChart
             labels={labels}
             tooltipLabels={(data?.daily ?? []).map((d) => d.day)}
             series={[
@@ -133,14 +138,14 @@ export default function DashboardPage() {
             format={(v) => v.toLocaleString("en-US", { maximumFractionDigits: 1 })}
             unit=" min"
             height={240}
-          />
+          />}
         </Card>
         <AttentionCard />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card title="Top companies" subtitle="Speech minutes this month">
-          <BarList
+          {!data ? <LinesSkeleton rows={5} /> : <BarList
             items={top.map(({ c, u }) => ({
               key: c.id,
               label: c.company_name,
@@ -150,11 +155,13 @@ export default function DashboardPage() {
             }))}
             format={(v) => `${minutes(v)} min`}
             empty="No usage this month yet"
-          />
+          />}
         </Card>
 
         <Card title="Quota alerts" subtitle="Above 75% of the package, or on pace to run out this month">
-          {quota.length === 0 ? (
+          {!data ? (
+            <LinesSkeleton rows={4} />
+          ) : quota.length === 0 ? (
             <Empty>Every company is within its monthly minutes.</Empty>
           ) : (
             <div className="space-y-4">
@@ -182,7 +189,9 @@ export default function DashboardPage() {
           subtitle="Newest first · ring = this month's minutes vs package"
           action={<Button size="sm" variant="ghost" onClick={() => navigate({ page: "companies" })}>All <ChevronRight size={13} /></Button>}
         >
-          {recent.length === 0 ? (
+          {!clientsLoaded ? (
+            <LinesSkeleton rows={5} />
+          ) : recent.length === 0 ? (
             <Empty>No licences yet.</Empty>
           ) : (
             <ul className="space-y-1">
@@ -210,7 +219,7 @@ export default function DashboardPage() {
           <RequestsAndErrors data={data} labels={labels} />
         </Card>
         <Card className="xl:col-span-5" title="Busiest hours" subtitle="Speech minutes by day and hour, last 30 days">
-          <Heatmap cells={data?.heatmap ?? []} format={(v) => `${minutes(v)} min`} />
+          {!data ? <Skeleton className="h-[230px]" /> : <Heatmap cells={data.heatmap} format={(v) => `${minutes(v)} min`} />}
         </Card>
       </div>
 
@@ -286,7 +295,17 @@ export default function DashboardPage() {
 }
 
 export function RequestsAndErrors({ data, labels }: { data: Analytics | null; labels: string[] }) {
-  const daily = data?.daily ?? [];
+  if (!data) {
+    return (
+      <div className="space-y-5">
+        <div className="grid grid-cols-3 gap-3">
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="h-[54px] rounded-xl" />)}
+        </div>
+        <ChartSkeleton height={180} bars={30} />
+      </div>
+    );
+  }
+  const daily = data.daily;
   const total = daily.reduce((a, d) => a + d.stt_requests + d.tts_requests, 0);
   const errors = daily.reduce((a, d) => a + d.errors, 0);
   const rejected = daily.reduce((a, d) => a + d.rejected, 0);
@@ -333,7 +352,7 @@ function AttentionCard() {
       action={<Button size="sm" variant="ghost" onClick={() => navigate({ page: "gpus" })}>Details <ChevronRight size={13} /></Button>}
     >
       {!loaded ? (
-        <Empty>Checking the GPUs…</Empty>
+        <LinesSkeleton rows={3} />
       ) : error && alerts.length === 0 ? (
         <div className="text-[13px] text-warning py-6">Cannot reach the fleet controller: {error}</div>
       ) : alerts.length === 0 ? (
@@ -346,9 +365,10 @@ function AttentionCard() {
           {alerts.map(({ node, assessment }) => (
             <li
               key={node.id}
+              onClick={() => navigate({ page: "gpus", node: node.id })}
               className={cx(
-                "rounded-xl border p-3",
-                assessment.level === "down" ? "border-critical/40 bg-critical/[0.07]" : "border-warning/30 bg-warning/[0.05]",
+                "rounded-xl border p-3 cursor-pointer transition-colors",
+                assessment.level === "down" ? "border-critical/40 bg-critical/[0.07] hover:bg-critical/[0.12]" : "border-warning/30 bg-warning/[0.05] hover:bg-warning/[0.1]",
               )}
             >
               <div className="flex items-center gap-2">
@@ -376,7 +396,7 @@ function GpusNeededCard() {
   return (
     <Card title="GPUs needed vs active" subtitle="From every active licence's package lines">
       {!loaded ? (
-        <Empty>Loading…</Empty>
+        <LinesSkeleton rows={4} />
       ) : !capacity ? (
         <Empty>Fleet controller unreachable.</Empty>
       ) : (

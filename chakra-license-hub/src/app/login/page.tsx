@@ -51,7 +51,7 @@ export default function LoginPage() {
         <div className="bg-[#0f0e13]/80 backdrop-blur-md border border-white/5 rounded-3xl p-8 shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-[#00ebfb] to-indigo-500" />
 
-          <h2 className="text-2xl font-bold text-white mb-2 text-center">Welcome Back</h2>
+          <h2 className="text-2xl font-bold text-white mb-2 text-center">Sign in to Chakra Console</h2>
           <p className="text-zinc-500 text-[13px] text-center mb-8">Enter your admin credentials to access the hub.</p>
 
           {loginError && (
@@ -97,7 +97,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-center text-zinc-600 text-[11px] mt-8 font-medium tracking-wide">
-          SECURE ACCESS • CHAKRA LICENSE HUB
+          SECURE ACCESS • CHAKRA CONSOLE
         </p>
       </div>
     </div>
