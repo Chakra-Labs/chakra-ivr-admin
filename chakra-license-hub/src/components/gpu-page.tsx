@@ -272,7 +272,13 @@ function NodeCard({
           detail={h?.host?.ram_used_mb != null ? `${mb(h.host.ram_used_mb)} / ${mb(h.host.ram_total_mb)}` : "–"}
         />
       </div>
-      {h?.ok && !h.host && <p className="text-[11px] text-ink-3 -mt-2">CPU and RAM appear once this GPU runs the updated speech image.</p>}
+      {h?.ok && !h.host && (
+        <p className="text-[11px] text-ink-3 -mt-2">
+          {node.managed
+            ? "CPU and RAM appear after this GPU is redeployed in GPU fleet (that adds the stats helper)."
+            : "CPU and RAM need the fleet's stats helper; this GPU was set up by hand, so install it once."}
+        </p>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[12px]">
         <Info label="Model" value={h?.model?.split("/").pop()} />
