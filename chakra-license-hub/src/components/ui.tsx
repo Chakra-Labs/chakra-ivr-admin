@@ -331,7 +331,7 @@ export function Drawer({
       <div className={cx("absolute inset-0 bg-black/60 backdrop-blur-[2px]", closing ? "backdrop-out" : "backdrop-in")} onClick={close} />
       <aside
         className={cx(
-          "absolute right-0 top-0 h-full w-full bg-canvas border-l border-line-strong shadow-2xl flex flex-col",
+          "absolute right-0 top-0 h-viewport w-full bg-canvas border-l border-line-strong shadow-2xl flex flex-col",
           width,
           closing ? "drawer-out" : "drawer-in",
         )}

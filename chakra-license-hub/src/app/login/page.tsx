@@ -91,7 +91,7 @@ export default function LoginPage() {
               disabled={loading}
               className="w-full py-3.5 mt-4 bg-[#00ebfb] text-black hover:bg-[#00ebfb]/90 rounded-xl font-bold transition-all shadow-[0_0_20px_rgba(0,235,251,0.2)] text-[14px] flex justify-center items-center gap-2 disabled:opacity-50"
             >
-              {loading ? "Authenticating..." : "Sign In to Admin Hub"}
+              {loading ? "Signing in…" : "Sign in"}
             </button>
           </form>
         </div>

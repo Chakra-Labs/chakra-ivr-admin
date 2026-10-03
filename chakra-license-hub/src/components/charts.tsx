@@ -270,7 +270,9 @@ export function LineChart({
 
   const onMove = (e: React.MouseEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const px = e.clientX - rect.left;
+    // Pointer and box positions can be in zoomed pixels; the chart is drawn in
+    // CSS pixels (`width`). Scale between the two so page zoom can't skew it.
+    const px = (e.clientX - rect.left) * (width / Math.max(1, rect.width));
     if (n < 1) return;
     const i = Math.round(((px - padL) / Math.max(1, plotW)) * (n - 1));
     setHover(Math.max(0, Math.min(n - 1, i)));

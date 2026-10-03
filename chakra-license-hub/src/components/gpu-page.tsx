@@ -177,9 +177,9 @@ export default function GpuPage({ node: openId }: { node?: number }) {
       </div>
 
       {!fleet.loaded ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {Array.from({ length: 8 }, (_, i) => (
-            <Skeleton key={i} className="h-[168px] rounded-xl" />
+            <Skeleton key={i} className="h-[196px] rounded-2xl" />
           ))}
         </div>
       ) : nodes.length === 0 ? (
@@ -187,7 +187,7 @@ export default function GpuPage({ node: openId }: { node?: number }) {
       ) : shown.length === 0 ? (
         <Empty>No GPU matches these filters.</Empty>
       ) : view === "tiles" ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {shown.map((n, i) => (
             <GpuTile key={n.id} node={n} a={fleet.assessments.get(n.id)} s={summaries[String(n.id)]} index={i} onOpen={() => openGpu(n.id)} />
           ))}
@@ -241,9 +241,9 @@ function MiniBar({ label, value }: { label: string; value: number | null }) {
   const v = value == null ? null : Math.max(0, Math.min(1, value));
   const color = v == null ? "transparent" : v >= 0.9 ? "var(--critical)" : v >= 0.75 ? "var(--warning)" : "var(--accent)";
   return (
-    <div className="flex items-center gap-2 text-[10px]">
+    <div className="flex items-center gap-2 text-[11px]">
       <span className="w-8 text-ink-3">{label}</span>
-      <span className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+      <span className="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
         <span className="block h-full rounded-full transition-[width] duration-700" style={{ width: `${(v ?? 0) * 100}%`, background: color }} />
       </span>
       <span className="w-8 text-right text-ink-2 tabular">{v == null ? "–" : `${Math.round(v * 100)}%`}</span>
@@ -262,30 +262,30 @@ function GpuTile({ node, a, s, index, onOpen }: { node: FleetNode; a?: Assessmen
       // Tiles rise in one after another (capped so 50 GPUs don't take long).
       style={{ animationDelay: `${Math.min(index, 12) * 25}ms` }}
       className={cx(
-        "rise-in text-left bg-panel border rounded-xl p-3.5 min-w-0 transition-[border-color,transform,background-color] duration-200 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-accent",
+        "rise-in text-left bg-panel border rounded-2xl p-4 min-w-0 transition-[border-color,transform,background-color] duration-200 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-accent",
         down ? "border-critical/50 bg-critical/[0.05] hover:border-critical" : a?.level === "peak" ? "border-warning/40 hover:border-warning/70" : "border-line hover:border-line-strong",
       )}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 min-w-0">
           <Dot tone={STATUS_TONE[st]} pulse={down} />
-          <span className="text-[13px] font-semibold text-ink truncate">{node.name}</span>
+          <span className="text-[14px] font-semibold text-ink truncate">{node.name}</span>
         </span>
         <span className={cx("text-[10px] font-mono font-semibold", node.role === "stt" ? "text-series-1" : "text-serious")}>{node.role.toUpperCase()}</span>
       </div>
-      <div className="text-[11px] text-ink-3 font-mono truncate mt-0.5">
+      <div className="text-[12px] text-ink-3 font-mono truncate mt-1">
         {node.host}
         {h?.gpu ? ` · ${h.gpu.replace("NVIDIA ", "").replace("RTX ", "")}` : ""}
       </div>
-      <div className={cx("text-[11px] mt-1.5 h-4 truncate", down ? "text-critical" : a?.level === "peak" ? "text-warning" : "text-ink-3")}>
+      <div className={cx("text-[12px] mt-2 h-4 truncate", down ? "text-critical" : a?.level === "peak" ? "text-warning" : "text-ink-3")}>
         {a?.reasons[0] ?? (st === "draining" ? "Draining · takes no calls" : st === "pending" ? "Deploying…" : st === "healthy" ? "Healthy" : "No data yet")}
       </div>
-      <div className="grid grid-cols-3 gap-2 mt-3">
+      <div className="grid grid-cols-3 gap-2 mt-4">
         <TileFigure label="Load" value={a?.load != null ? pct(a.load) : "–"} warn={(a?.load ?? 0) >= PEAK.loadRatio} />
         <TileFigure label="p95" value={ms(s?.p95_ms_5m)} warn={s?.p95_ms_5m != null && s.p95_ms_5m > PEAK.p95Ms[node.role]} />
         <TileFigure label="req/min" value={rpm == null ? "–" : num(rpm, rpm < 10 ? 1 : 0)} />
       </div>
-      <div className="mt-3 space-y-1">
+      <div className="mt-4 space-y-1.5">
         <MiniBar label="GPU" value={ratio(h?.vram_mb, h?.vram_total_mb)} />
         <MiniBar label="CPU" value={h?.host?.cpu_pct != null ? h.host.cpu_pct / 100 : null} />
         <MiniBar label="RAM" value={ratio(h?.host?.ram_used_mb, h?.host?.ram_total_mb)} />
@@ -297,8 +297,8 @@ function GpuTile({ node, a, s, index, onOpen }: { node: FleetNode; a?: Assessmen
 function TileFigure({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] text-ink-3">{label}</div>
-      <div className={cx("text-[13px] font-semibold tabular truncate", warn ? "text-warning" : "text-ink")}>{value}</div>
+      <div className="text-[11px] text-ink-3">{label}</div>
+      <div className={cx("text-[16px] font-semibold tabular truncate", warn ? "text-warning" : "text-ink")}>{value}</div>
     </div>
   );
 }

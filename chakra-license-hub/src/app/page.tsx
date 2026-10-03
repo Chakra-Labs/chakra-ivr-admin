@@ -71,10 +71,16 @@ function Shell() {
       });
       if (!samePage) window.scrollTo({ top: 0 });
     };
-    const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => { finished: Promise<void> } };
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (animate && !samePage && !reduce && doc.startViewTransition) doc.startViewTransition(update);
-    else update();
+    if (animate && !samePage && !reduce && doc.startViewTransition) {
+      // Into a company: slide forward. Out of one: slide back. Else cross-fade.
+      const nav = r.page === "company" && before.page !== "company" ? "forward" : before.page === "company" && r.page !== "company" ? "back" : "fade";
+      document.documentElement.dataset.nav = nav;
+      doc.startViewTransition(update).finished.finally(() => {
+        delete document.documentElement.dataset.nav;
+      });
+    } else update();
   }, []);
 
   useEffect(() => {
@@ -186,7 +192,7 @@ function Shell() {
 
   return (
     <HubContext.Provider value={hub}>
-      <div className="min-h-screen bg-canvas text-ink flex">
+      <div className="min-h-viewport bg-canvas text-ink flex">
         {/* Toast */}
         <div
           role="status"
@@ -220,7 +226,11 @@ function Shell() {
           />
           <div className="flex-1 px-4 md:px-8 py-6">
             {/* Keyed per page, so each page fades in when opened. */}
-            <div key={route.page === "company" ? `company-${route.id}` : route.page} className="max-w-[1440px] mx-auto page-in">
+            <div
+              key={route.page === "company" ? `company-${route.id}` : route.page}
+              className="max-w-[1440px] mx-auto page-in"
+              style={{ viewTransitionName: "page" }}
+            >
               {route.page === "dashboard" && <DashboardPage />}
               {route.page === "companies" && <CompaniesPage />}
               {route.page === "company" && <CompanyDetail id={route.id} />}
@@ -250,7 +260,6 @@ function Sidebar({ route, open, onClose }: { route: Route; open: boolean; onClos
       label: "Customers",
       items: [
         { page: "companies", label: "Companies", icon: <Building size={16} /> },
-        { page: "new", label: "New licence", icon: <Key size={16} /> },
         { page: "packages", label: "Packages", icon: <Box size={16} /> },
       ],
     },
@@ -277,21 +286,19 @@ function Sidebar({ route, open, onClose }: { route: Route; open: boolean; onClos
       {open && <div className="fixed inset-0 bg-black/60 z-40 md:hidden" onClick={onClose} />}
       <aside
         className={cx(
-          "w-[248px] shrink-0 bg-canvas border-r border-line flex flex-col h-screen z-50",
+          "w-[248px] shrink-0 bg-canvas border-r border-line flex flex-col h-viewport z-50",
           "fixed md:sticky top-0 transition-transform md:translate-x-0",
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="h-16 px-5 flex items-center justify-between border-b border-line">
-          <div className="flex flex-col">
-            <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={160} height={44} className="w-auto h-8 object-contain object-left" priority />
-            <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-3 mt-0.5 pl-0.5">Console</span>
-          </div>
-          <button onClick={onClose} className="md:hidden text-ink-3 hover:text-ink" aria-label="Close menu">
+        <div className="relative px-5 pt-8 pb-5 flex flex-col items-center">
+          <Image src="/chakra-labs-logo.png" alt="Chakra Labs" width={170} height={48} className="w-auto h-10 object-contain" priority />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-ink-3 mt-1.5">Console</span>
+          <button onClick={onClose} className="md:hidden absolute right-4 top-4 text-ink-3 hover:text-ink" aria-label="Close menu">
             <X size={18} />
           </button>
         </div>
-        <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 py-5 space-y-6">
+        <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 pt-2 pb-5 space-y-6">
           {groups.map((g) => (
             <div key={g.label}>
               <div className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">{g.label}</div>
@@ -326,6 +333,15 @@ function Sidebar({ route, open, onClose }: { route: Route; open: boolean; onClos
         </div>
         */}
 
+        <div className="px-3 pt-3">
+          <a
+            href="#new"
+            aria-current={active === "new" ? "page" : undefined}
+            className="h-10 w-full rounded-xl bg-accent text-accent-ink text-[13px] font-semibold flex items-center justify-center gap-2 hover:bg-accent/85 transition-colors"
+          >
+            <Key size={15} /> New licence
+          </a>
+        </div>
         <a href="#gpus" className="m-3 p-3 rounded-xl border border-line bg-panel-2 flex items-center gap-3 hover:border-line-strong transition-colors">
           <span
             className={cx(
